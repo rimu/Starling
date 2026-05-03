@@ -1232,14 +1232,22 @@ function ensure_html(string $content): string
                 $attrs = $m[1];
                 $safeHref = '';
                 $relTokens = [];
+                $extractMatchValue = static function (array $match): string {
+                    foreach ([1, 2, 3] as $index) {
+                        if (array_key_exists($index, $match)) {
+                            return (string)$match[$index];
+                        }
+                    }
+                    return '';
+                };
                 if (preg_match('/\shref\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $hrefMatch)) {
-                    $href = html_entity_decode((string)($hrefMatch[1] ?: $hrefMatch[2] ?: $hrefMatch[3] ?: ''), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                    $href = html_entity_decode($extractMatchValue($hrefMatch), ENT_QUOTES | ENT_HTML5, 'UTF-8');
                     if (preg_match('~^https?://~i', $href)) {
                         $safeHref = htmlspecialchars($href, ENT_QUOTES | ENT_HTML5, 'UTF-8');
                     }
                 }
                 if (preg_match('/\srel\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $relMatch)) {
-                    $relRaw = strtolower(html_entity_decode((string)($relMatch[1] ?: $relMatch[2] ?: $relMatch[3] ?: ''), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+                    $relRaw = strtolower(html_entity_decode($extractMatchValue($relMatch), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
                     $relTokens = preg_split('/\s+/', trim($relRaw)) ?: [];
                 }
                 // Rebuild the link so unquoted or dangerous href values do not survive.
