@@ -7,14 +7,17 @@ $starlingDefaults = [
     'name'          => 'Starling',
     'description'   => 'A lightweight ActivityPub server.',
     'admin_email'   => 'admin@example.com',
+    'security_secret' => '',
     'base_url'      => 'https://example.com',
     'db_path'       => ROOT . '/storage/db/activitypub.sqlite',
     'media_dir'     => ROOT . '/storage/media',
     'max_upload_mb' => 30,
     'open_reg'      => false,
     'post_chars'    => 10000,
+    'home_timeline_max_items' => 800,
+    'list_timeline_max_items' => 800,
     'debug'         => false,
-    'version'       => '0.0.4',
+    'version'       => '0.0.5',
     'software'      => 'starling',
     'source_url'    => 'https://github.com/dfaria-eu/Starling/',
     'atproto_did'   => '',
@@ -52,6 +55,9 @@ define('AP_DOMAIN',        $starlingDomain);
 define('AP_NAME',          (string)$starlingCfg['name']);
 define('AP_DESCRIPTION',   $starlingDescription);
 define('AP_ADMIN_EMAIL',   (string)$starlingCfg['admin_email']);
+define('AP_SECURITY_SECRET', trim((string)($starlingCfg['security_secret'] ?? '')) !== ''
+    ? (string)$starlingCfg['security_secret']
+    : hash('sha256', ROOT . '|' . __FILE__));
 define('AP_BASE_URL',      $starlingBaseUrl);
 
 // ROOT is defined automatically by index.php
@@ -62,6 +68,8 @@ define('AP_MAX_UPLOAD_MB', (int)$starlingCfg['max_upload_mb']);
 
 define('AP_OPEN_REG',      (bool)$starlingCfg['open_reg']);  // false = only admins can create accounts
 define('AP_POST_CHARS',    (int)$starlingCfg['post_chars']);
+define('AP_HOME_TIMELINE_MAX_ITEMS', max(1, (int)$starlingCfg['home_timeline_max_items']));
+define('AP_LIST_TIMELINE_MAX_ITEMS', max(1, (int)$starlingCfg['list_timeline_max_items']));
 define('AP_DEBUG',         (bool)$starlingCfg['debug']);
 define('AP_VERSION',       (string)$starlingCfg['version']);
 define('AP_SOFTWARE',      (string)$starlingCfg['software']);
