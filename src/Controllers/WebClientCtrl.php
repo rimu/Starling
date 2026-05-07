@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 namespace App\Controllers;
-use App\Models\{DB, OAuthModel, UserModel};
+use App\Models\{DB, OAuthModel, TwoFactorModel, UserModel};
 
 class WebClientCtrl
 {
@@ -74,6 +74,58 @@ class WebClientCtrl
         return $app['id'];
     }
 
+    private function completeWebLogin(array $user): never
+    {
+        $appId = $this->ensureWebApp();
+        $token = OAuthModel::createToken($appId, $user['id'], 'read write follow push');
+        $this->setAuthCookie($token);
+        $this->clearPendingWebLogin();
+        session_destroy();
+        $this->redirect('/web');
+    }
+
+    private function beginPendingWebLogin(array $user): void
+    {
+        $_SESSION['web_login_2fa'] = [
+            'user_id' => (string)$user['id'],
+            'started_at' => time(),
+        ];
+    }
+
+    private function clearPendingWebLogin(): void
+    {
+        unset($_SESSION['web_login_2fa']);
+    }
+
+    private function pendingWebLoginUser(): ?array
+    {
+        $pending = $_SESSION['web_login_2fa'] ?? null;
+        if (!is_array($pending)) return null;
+        $startedAt = (int)($pending['started_at'] ?? 0);
+        if ($startedAt < (time() - 600)) {
+            $this->clearPendingWebLogin();
+            return null;
+        }
+        $userId = trim((string)($pending['user_id'] ?? ''));
+        if ($userId === '') {
+            $this->clearPendingWebLogin();
+            return null;
+        }
+        $user = UserModel::byId($userId);
+        if (!$user || !TwoFactorModel::isEnabled($user) || !empty($user['is_suspended'])) {
+            $this->clearPendingWebLogin();
+            return null;
+        }
+        return $user;
+    }
+
+    private function verifySecondFactor(array $user, string $code, string $recoveryCode): bool
+    {
+        if ($code !== '' && TwoFactorModel::verifyCode($user, $code, true)) return true;
+        if ($recoveryCode !== '' && TwoFactorModel::consumeRecoveryCode($user, $recoveryCode)) return true;
+        return false;
+    }
+
     // ── Brute-force protection ─────────────────────────────────────────────────
 
     private function checkRateLimit(string $ip): bool
@@ -106,22 +158,37 @@ class WebClientCtrl
         }
 
         $this->startSession();
+        if (($_GET['reset'] ?? '') === '1') {
+            $this->clearPendingWebLogin();
+        }
         $error = '';
         $ip    = $_SERVER['REMOTE_ADDR'] ?? '';
+        $pendingUser = $this->pendingWebLoginUser();
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $csrf = $_POST['csrf'] ?? '';
             if (!hash_equals($_SESSION['csrf'] ?? '', $csrf)) {
                 $error = 'Invalid request.';
             } elseif ($this->checkRateLimit($ip)) {
                 $error = 'Too many failed attempts. Please wait 15 minutes.';
+            } elseif ($pendingUser) {
+                $code = trim((string)($_POST['code'] ?? ''));
+                $recoveryCode = trim((string)($_POST['recovery_code'] ?? ''));
+                if ($this->verifySecondFactor($pendingUser, $code, $recoveryCode)) {
+                    $this->completeWebLogin(UserModel::byId((string)$pendingUser['id']) ?? $pendingUser);
+                } else {
+                    sleep(1);
+                    $this->recordFailedAttempt($ip);
+                    $error = 'Invalid authenticator or recovery code.';
+                }
             } else {
                 $u = UserModel::verify($_POST['username'] ?? '', $_POST['password'] ?? '');
                 if ($u && empty($u['is_suspended'])) {
-                    $appId = $this->ensureWebApp();
-                    $token = OAuthModel::createToken($appId, $u['id'], 'read write follow push');
-                    $this->setAuthCookie($token);
-                    session_destroy();
-                    $this->redirect('/web');
+                    if (TwoFactorModel::isEnabled($u)) {
+                        $this->beginPendingWebLogin($u);
+                        $pendingUser = $u;
+                    } else {
+                        $this->completeWebLogin($u);
+                    }
                 } else {
                     sleep(1);
                     $this->recordFailedAttempt($ip);
@@ -132,7 +199,7 @@ class WebClientCtrl
         $_SESSION['csrf'] = bin2hex(random_bytes(16));
         $csrf = $_SESSION['csrf'];
         session_write_close();
-        $this->html($this->loginPage($csrf, $error));
+        $this->html($pendingUser ? $this->loginTwoFactorPage($csrf, $error, (string)$pendingUser['username']) : $this->loginPage($csrf, $error));
     }
 
     public function register(array $p): void
@@ -576,6 +643,7 @@ class WebClientCtrl
   </form>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script>' . $this->js() . '</script>
 </body>
 </html>';
@@ -691,6 +759,52 @@ class WebClientCtrl
 </html>';
     }
 
+    private function loginTwoFactorPage(string $csrf, string $error, string $username): string
+    {
+        $domain   = htmlspecialchars(AP_DOMAIN, ENT_QUOTES);
+        $csrfHtml = htmlspecialchars($csrf, ENT_QUOTES);
+        $userHtml = htmlspecialchars($username, ENT_QUOTES);
+        $errorHtml = $error !== ''
+            ? '<div class="login-error">' . htmlspecialchars($error, ENT_QUOTES) . '</div>'
+            : '';
+
+        return '<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Two-Factor Authentication · ' . $domain . '</title>
+<link rel="icon" href="' . htmlspecialchars(\site_favicon_url(), ENT_QUOTES | ENT_HTML5, 'UTF-8') . '">
+<style>' . $this->css() . '</style>
+</head>
+<body>
+<nav id="sidebar" style="width:auto;position:static;border:none;background:transparent;padding:1rem 1.5rem 0;flex-direction:row;height:auto;gap:.5rem;display:flex;align-items:center">
+  <span class="sidebar-logo" style="margin-bottom:0"><span class="fedi-symbol">⋰⋱</span><span>Starling</span></span>
+</nav>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-title">Check your authenticator</div>
+    <div class="login-foot" style="margin-top:0;margin-bottom:1rem">Signing in as <strong>@' . $userHtml . '</strong></div>
+    ' . $errorHtml . '
+    <form method="post" action="/web/login" autocomplete="one-time-code">
+      <input type="hidden" name="csrf" value="' . $csrfHtml . '">
+      <div class="login-field">
+        <label for="code">Authenticator code</label>
+        <input id="code" type="text" name="code" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" autofocus>
+      </div>
+      <div class="login-field">
+        <label for="recovery_code">Recovery code</label>
+        <input id="recovery_code" type="text" name="recovery_code" placeholder="Use this only if you cannot access your authenticator">
+      </div>
+      <button type="submit" class="login-submit">Verify</button>
+    </form>
+    <div class="login-foot"><a href="/web/login?reset=1">Start over</a></div>
+  </div>
+</div>
+</body>
+</html>';
+    }
+
     private function registerPage(string $csrf, string $error): string
     {
         $domain   = htmlspecialchars(AP_DOMAIN, ENT_QUOTES);
@@ -751,14 +865,14 @@ class WebClientCtrl
         return <<<'CSS'
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#fff;--surface:#fff;--hover:#F3F3F8;--blue:#0085FF;--blue2:#0070E0;--blue-bg:#E0EDFF;
+  --bg:#fff;--surface:#fff;--surface2:#F7F9FC;--hover:color-mix(in srgb,#EFF2F6 50%,#fff);--blue:#0085FF;--blue2:#0070E0;--blue-bg:#E0EDFF;
   --border:#E5E7EB;--text:#0F1419;--text2:#66788A;--text3:#8D99A5;
   --green:#20BC07;--red:#EC4040;--pink:#EC4899;--amber:#FFC404;
   --sidebar-w:240px;--max-w:600px;--right-w:280px;--radius:12px;
 }
 @media(prefers-color-scheme:dark){
   :root{
-    --bg:#0A0E14;--surface:#161823;--hover:#1E2030;--border:#2E3039;--text:#F1F3F5;--text2:#7B8794;--text3:#545864;--blue-bg:#0C1B3A;
+    --bg:#0A0E14;--surface:#161823;--surface2:#111722;--hover:color-mix(in srgb,#19222E 40%,#0A0E14);--border:#2E3039;--text:#F1F3F5;--text2:#7B8794;--text3:#545864;--blue-bg:#0C1B3A;
     --green:#4ade80;--red:#f87171;--pink:#f472b6;--amber:#fbbf24
   }
 }
@@ -767,11 +881,11 @@ body{font-family:'Inter',system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",s
 html[data-theme-pref="light"]{color-scheme:light}
 html[data-theme-pref="dark"]{color-scheme:dark}
 html[data-theme-pref="light"]{
-  --bg:#fff;--surface:#fff;--hover:#F3F3F8;--border:#E5E7EB;--text:#0F1419;--text2:#66788A;--text3:#8D99A5;--blue-bg:#E0EDFF;
+  --bg:#fff;--surface:#fff;--surface2:#F7F9FC;--hover:color-mix(in srgb,#EFF2F6 50%,#fff);--border:#E5E7EB;--text:#0F1419;--text2:#66788A;--text3:#8D99A5;--blue-bg:#E0EDFF;
   --green:#20BC07;--red:#EC4040;--pink:#EC4899;--amber:#FFC404;
 }
 html[data-theme-pref="dark"]{
-  --bg:#0A0E14;--surface:#161823;--hover:#1E2030;--border:#2E3039;--text:#F1F3F5;--text2:#7B8794;--text3:#545864;--blue-bg:#0C1B3A;
+  --bg:#0A0E14;--surface:#161823;--surface2:#111722;--hover:color-mix(in srgb,#19222E 40%,#0A0E14);--border:#2E3039;--text:#F1F3F5;--text2:#7B8794;--text3:#545864;--blue-bg:#0C1B3A;
   --green:#4ade80;--red:#f87171;--pink:#f472b6;--amber:#fbbf24;
 }
 a{color:inherit;text-decoration:none}
@@ -857,7 +971,7 @@ button{font-family:inherit}
 #main-col{
   flex:1;max-width:var(--max-w);
   border-left:1px solid var(--border);border-right:1px solid var(--border);
-  min-height:100vh;background:var(--surface)
+  min-height:100vh;background:var(--bg)
 }
 
 /* Right panel */
@@ -945,8 +1059,7 @@ button{font-family:inherit}
 #home-tabs-bar{
   display:none;flex-direction:row;align-items:stretch;
   position:sticky;top:0;z-index:11;
-  background:color-mix(in srgb,var(--surface) 85%,transparent);
-  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  background:var(--bg);
   border-bottom:1px solid var(--border);
   overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch
 }
@@ -964,8 +1077,7 @@ button{font-family:inherit}
   display:flex;align-items:center;gap:.6rem;
   padding:.7rem 1rem;border-bottom:1px solid var(--border);
   position:sticky;top:2.9rem;z-index:10;
-  background:color-mix(in srgb,var(--surface) 85%,transparent);
-  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+  background:var(--bg)
 }
 .explore-search-bar svg{
   width:1.1rem;height:1.1rem;fill:var(--text3);flex-shrink:0
@@ -976,7 +1088,7 @@ button{font-family:inherit}
 }
 .explore-search-bar input::placeholder{color:var(--text3)}
 /* Explore tabs */
-.explore-tabs{display:flex;border-bottom:1px solid var(--border);position:sticky;top:5.75rem;z-index:9;background:color-mix(in srgb,var(--surface) 85%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.explore-tabs{display:flex;border-bottom:1px solid var(--border);position:sticky;top:5.75rem;z-index:9;background:var(--bg)}
 .explore-tab{flex:1;padding:.8rem 0;text-align:center;font-size:.9rem;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:color .15s}
 .explore-tab:hover{color:var(--text)}
 .explore-tab.active{color:var(--text);border-bottom:3px solid var(--blue);font-weight:600}
@@ -1028,6 +1140,8 @@ button{font-family:inherit}
 }
 .settings-secret strong{color:var(--text)}
 .settings-inline-note{font-size:.82rem;color:var(--text2);margin-top:.5rem}
+.settings-qr-wrap{display:grid;place-items:center;padding:1rem;margin-top:.9rem;border:1px solid var(--border);border-radius:14px;background:color-mix(in srgb,var(--surface) 92%,var(--blue-bg))}
+.settings-qr-wrap svg{display:block;width:192px;height:192px;max-width:100%}
 .settings-token-box{
   margin-top:.75rem;padding:.8rem .9rem;border-radius:12px;
   background:color-mix(in srgb,var(--blue) 8%,var(--surface));border:1px solid var(--border)
@@ -1072,8 +1186,7 @@ button{font-family:inherit}
   position:sticky;top:0;z-index:10;padding:.75rem 1rem;
   font-size:1.05rem;font-weight:600;
   display:flex;align-items:center;gap:.5rem;
-  background:color-mix(in srgb,var(--surface) 85%,transparent);
-  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  background:var(--bg);
   border-bottom:1px solid var(--border)
 }
 #col-back-btn{
@@ -1096,7 +1209,7 @@ button{font-family:inherit}
 .status-card:first-child{border-top:none}
 .status-card:not(.status-focal){cursor:pointer}
 .status-card:hover{background:var(--hover)}
-.status-card.status-focal{background:var(--surface)}
+.status-card.status-focal{background:transparent}
 .boost-bar{
   display:flex;align-items:center;gap:.4rem;
   font-size:.82rem;color:var(--text2);margin-bottom:.4rem;padding-left:52px
@@ -1175,7 +1288,7 @@ button{font-family:inherit}
 .s-content.truncated{max-height:12rem;overflow:hidden;position:relative}
 .s-content.truncated::after{
   content:'';position:absolute;bottom:0;left:0;right:0;height:3rem;
-  background:linear-gradient(transparent,var(--surface))
+  background:linear-gradient(transparent,var(--bg))
 }
 .show-more-btn{
   background:none;border:none;color:var(--blue);font-size:.85rem;font-weight:600;
@@ -1537,7 +1650,7 @@ button{font-family:inherit}
 .profile-dm-btn svg{width:1.1rem;height:1.1rem}
 .profile-dm-btn.active{border-color:var(--blue);color:var(--blue)}
 .profile-dm-btn.active:hover{background:color-mix(in srgb,var(--blue) 10%,transparent)}
-.profile-tabs{display:flex;border-bottom:1px solid var(--border);position:sticky;top:2.9rem;z-index:9;background:color-mix(in srgb,var(--surface) 85%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.profile-tabs{display:flex;border-bottom:1px solid var(--border);position:sticky;top:2.9rem;z-index:9;background:var(--bg)}
 .profile-tab{flex:1;padding:.75rem 0;text-align:center;font-size:.88rem;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:color .15s;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit}
 .profile-tab:hover{color:var(--text)}
 .profile-tab.active{color:var(--text);border-bottom:3px solid var(--blue);font-weight:600}
@@ -3433,6 +3546,7 @@ async function showSettings() {
     let blockedDomains = [];
     let filters = [];
     let sessions = [];
+    let twoFactor = {enabled:false,pending_setup:false,recovery_codes_remaining:0,method:null};
     let aliases = [];
     let developer = {apps: [], tokens: []};
     try { account = await Api.get('/api/v1/accounts/verify_credentials'); } catch {}
@@ -3443,6 +3557,7 @@ async function showSettings() {
     try { blockedDomains = await Api.get('/api/v1/domain_blocks'); } catch {}
     try { filters = await Api.get('/api/v1/filters'); } catch {}
     try { sessions = await Api.get('/api/v1/sessions'); } catch {}
+    try { twoFactor = await Api.get('/api/v1/accounts/2fa'); } catch {}
     try { aliases = await Api.get('/api/v1/accounts/aliases'); } catch {}
     try { developer = await Api.get('/api/v1/developer/apps'); } catch {}
     const defVis = prefs['posting:default:visibility'] ?? 'public';
@@ -3916,6 +4031,8 @@ async function showSettings() {
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Account security</h2>
+        <div id="settings-2fa-box" class="settings-stack"></div>
+        <div class="settings-subtitle">Password</div>
         <div class="settings-row">
             <label class="settings-label">Current password</label>
             <input type="password" id="set-pw-cur" class="settings-input" autocomplete="current-password">
@@ -3953,6 +4070,7 @@ async function showSettings() {
             </button>
         </form>
     </div>` : ''}`;
+    renderTwoFactorSettings(twoFactor);
     setupSettingsTabs();
 }
 
@@ -4253,7 +4371,7 @@ function setupSettingsTabs() {
         nav.style.position = 'sticky';
         nav.style.top = '2.9rem';
         nav.style.zIndex = '9';
-        nav.style.background = 'var(--surface)';
+        nav.style.background = 'var(--bg)';
         nav.style.borderBottom = '1px solid var(--border)';
         col.insertBefore(nav, sections[0]);
     }
@@ -4549,6 +4667,183 @@ async function revokeCurrentSession() {
     try {
         await Api.del('/api/v1/sessions', {scope: 'current'});
         window.location.href = '/web/login';
+    } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+function renderRecoveryCodesOnce(codes) {
+    if (!Array.isArray(codes) || !codes.length) return '';
+    return `<div class="settings-token-box" style="display:block">
+        <strong>Save these recovery codes now. Each code can only be used once.</strong>
+        <pre>${esc(codes.join('\n'))}</pre>
+    </div>`;
+}
+
+function renderTwoFactorQr(otpAuth) {
+    if (!otpAuth || typeof qrcode !== 'function') return '';
+    try {
+        const qr = qrcode(0, 'M');
+        qr.addData(String(otpAuth), 'Byte');
+        qr.make();
+        return `<div class="settings-qr-wrap">${qr.createSvgTag({cellSize:4, margin:0, scalable:true, alt:{text:'Authenticator QR code'}})}</div>`;
+    } catch {
+        return '';
+    }
+}
+
+function renderTwoFactorSettings(state, freshCodes = []) {
+    const root = document.getElementById('settings-2fa-box');
+    if (!root) return;
+    const enabled = !!state?.enabled;
+    const pending = !!state?.pending_setup;
+    const remaining = Number(state?.recovery_codes_remaining || 0);
+    const status = enabled
+        ? `Enabled · ${esc(remaining)} recovery code${remaining === 1 ? '' : 's'} remaining`
+        : (pending ? 'Setup in progress' : 'Disabled');
+
+    if (!enabled && !pending) {
+        root.innerHTML = `
+            <div class="settings-panel">
+                <div class="settings-panel-head">
+                    <div style="min-width:0;flex:1">
+                        <div class="settings-panel-title">Two-factor authentication</div>
+                        <div class="settings-panel-meta">${status}</div>
+                        <div class="settings-inline-note">Use any TOTP app such as Microsoft Authenticator, 1Password, Aegis or Google Authenticator.</div>
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <label class="settings-label">Current password</label>
+                    <input type="password" id="set-2fa-password" class="settings-input" autocomplete="current-password">
+                </div>
+                <button class="settings-save-btn" type="button" onclick="beginTwoFactorSetup()">Set up authenticator app</button>
+            </div>
+            ${renderRecoveryCodesOnce(freshCodes)}`;
+        return;
+    }
+
+    if (pending && !enabled) {
+        const secret = window.__twoFactorSetup?.secret || '';
+        const otpAuth = window.__twoFactorSetup?.otpauth_uri || '';
+        root.innerHTML = `
+            <div class="settings-panel">
+                <div class="settings-panel-head">
+                    <div style="min-width:0;flex:1">
+                        <div class="settings-panel-title">Confirm your authenticator app</div>
+                        <div class="settings-panel-meta">${status}</div>
+                        <div class="settings-inline-note">Add the key below to your authenticator app, then enter the 6-digit code to finish setup.</div>
+                    </div>
+                </div>
+                <div class="settings-secret"><strong>Manual setup key</strong><br>${esc(secret)}</div>
+                ${renderTwoFactorQr(otpAuth)}
+                ${otpAuth ? `<div class="settings-inline-note"><a href="${esc(otpAuth)}">Open in authenticator app</a></div>` : ''}
+                <div class="settings-row">
+                    <label class="settings-label">Authenticator code</label>
+                    <input type="text" id="set-2fa-code" class="settings-input" inputmode="numeric" autocomplete="one-time-code">
+                </div>
+                <div class="settings-actions-row">
+                    <button class="settings-save-btn" type="button" onclick="confirmTwoFactorSetup()">Enable 2FA</button>
+                    <button class="settings-save-btn" type="button" onclick="cancelTwoFactorSetup()" style="background:transparent;color:var(--blue);border:1px solid var(--border)">Cancel</button>
+                </div>
+            </div>
+            ${renderRecoveryCodesOnce(freshCodes)}`;
+        return;
+    }
+
+    root.innerHTML = `
+        <div class="settings-panel">
+            <div class="settings-panel-head">
+                <div style="min-width:0;flex:1">
+                    <div class="settings-panel-title">Two-factor authentication</div>
+                    <div class="settings-panel-meta">${status}</div>
+                    <div class="settings-inline-note">Authenticator codes and recovery codes can be used to confirm sensitive account actions.</div>
+                </div>
+            </div>
+            <div class="settings-row">
+                <label class="settings-label">Current password</label>
+                <input type="password" id="set-2fa-password" class="settings-input" autocomplete="current-password">
+            </div>
+            <div class="settings-row">
+                <label class="settings-label">Authenticator code</label>
+                <input type="text" id="set-2fa-code" class="settings-input" inputmode="numeric" autocomplete="one-time-code">
+            </div>
+            <div class="settings-row">
+                <label class="settings-label">Recovery code</label>
+                <input type="text" id="set-2fa-recovery" class="settings-input" placeholder="Optional fallback">
+            </div>
+            <div class="settings-actions-row">
+                <button class="settings-save-btn" type="button" onclick="regenerateRecoveryCodes()">New recovery codes</button>
+                <button class="settings-save-btn" type="button" onclick="disableTwoFactor()" style="background:transparent;color:var(--red,#EC4040);border:1px solid var(--border)">Disable 2FA</button>
+            </div>
+        </div>
+        ${renderRecoveryCodesOnce(freshCodes)}`;
+}
+
+function twoFactorPayload(includePassword = true) {
+    const body = {};
+    if (includePassword) body.current_password = document.getElementById('set-2fa-password')?.value || '';
+    const code = (document.getElementById('set-2fa-code')?.value || '').trim();
+    const recoveryCode = (document.getElementById('set-2fa-recovery')?.value || '').trim();
+    if (code) body.code = code;
+    if (recoveryCode) body.recovery_code = recoveryCode;
+    return body;
+}
+
+async function refreshTwoFactorSettings(freshCodes = []) {
+    try {
+        const state = await Api.get('/api/v1/accounts/2fa');
+        if (!state.pending_setup) window.__twoFactorSetup = null;
+        renderTwoFactorSettings(state, freshCodes);
+    } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+async function beginTwoFactorSetup() {
+    const currentPassword = document.getElementById('set-2fa-password')?.value || '';
+    if (!currentPassword) { Toast.err('Enter your current password first.'); return; }
+    try {
+        const setup = await Api.post('/api/v1/accounts/2fa/setup', {current_password: currentPassword});
+        window.__twoFactorSetup = setup;
+        renderTwoFactorSettings({...setup, pending_setup: true}, []);
+        Toast.ok('Authenticator setup started. Add the key to your app and confirm with a code.');
+    } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+function cancelTwoFactorSetup() {
+    window.__twoFactorSetup = null;
+    Api.del('/api/v1/accounts/2fa/setup', {}).catch(() => null);
+    renderTwoFactorSettings({enabled:false,pending_setup:false,recovery_codes_remaining:0}, []);
+}
+
+async function confirmTwoFactorSetup() {
+    const code = (document.getElementById('set-2fa-code')?.value || '').trim();
+    if (!code) { Toast.err('Enter the authenticator code first.'); return; }
+    try {
+        const done = await Api.post('/api/v1/accounts/2fa/confirm', {code});
+        window.__twoFactorSetup = null;
+        renderTwoFactorSettings(done, done.recovery_codes || []);
+        Toast.ok('Two-factor authentication enabled.');
+    } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+async function regenerateRecoveryCodes() {
+    const payload = twoFactorPayload(true);
+    if (!payload.current_password) { Toast.err('Enter your current password first.'); return; }
+    if (!payload.code && !payload.recovery_code) { Toast.err('Enter an authenticator code or recovery code first.'); return; }
+    try {
+        const done = await Api.post('/api/v1/accounts/2fa/recovery_codes', payload);
+        renderTwoFactorSettings(done, done.recovery_codes || []);
+        Toast.ok('Recovery codes regenerated.');
+    } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+async function disableTwoFactor() {
+    const payload = twoFactorPayload(true);
+    if (!payload.current_password) { Toast.err('Enter your current password first.'); return; }
+    if (!payload.code && !payload.recovery_code) { Toast.err('Enter an authenticator code or recovery code first.'); return; }
+    if (!confirm('Disable two-factor authentication for this account?')) return;
+    try {
+        await Api.del('/api/v1/accounts/2fa', payload);
+        window.__twoFactorSetup = null;
+        renderTwoFactorSettings({enabled:false,pending_setup:false,recovery_codes_remaining:0}, []);
+        Toast.ok('Two-factor authentication disabled.');
     } catch (e) { Toast.err('Error: ' + esc(e.message)); }
 }
 

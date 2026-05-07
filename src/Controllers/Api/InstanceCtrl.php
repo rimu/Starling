@@ -9,7 +9,7 @@ class InstanceCtrl
 {
     private function mastodonVersionLabel(): string
     {
-        return '4.2.0-compatible+' . AP_SOFTWARE . '-' . AP_VERSION;
+        return '4.6.0-compatible+' . AP_SOFTWARE . '-' . AP_VERSION;
     }
 
     private function activeLoginCountBetween(string $from, string $to): int
@@ -50,7 +50,7 @@ class InstanceCtrl
             )['c'] ?? 0)]],
             'icon'        => $iconUrl ? [['src' => $iconUrl, 'size' => '192x192']] : [],
             'languages'   => ['en'],
-            'api_versions' => ['mastodon' => 6],
+            'api_versions' => ['mastodon' => 9],
             'configuration' => array_merge($b['configuration'], [
                 'accounts'    => ['max_featured_tags' => 10, 'max_pinned_statuses' => 20],
                 'translation' => ['enabled' => false],

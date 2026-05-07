@@ -85,6 +85,22 @@ $writeGeneratedConfig = static function (array $config): bool {
     return @file_put_contents($path, $php, LOCK_EX) !== false;
 };
 
+$ensureSecuritySecret = static function () use ($writeGeneratedConfig): void {
+    $generatedPath = ROOT . '/storage/config.generated.php';
+    if (!is_file($generatedPath)) {
+        return;
+    }
+    $config = require $generatedPath;
+    if (!is_array($config)) {
+        return;
+    }
+    if (!empty($config['security_secret'])) {
+        return;
+    }
+    $config['security_secret'] = defined('AP_SECURITY_SECRET') ? AP_SECURITY_SECRET : hash('sha256', ROOT . '|bootstrap-security-secret');
+    $writeGeneratedConfig($config);
+};
+
 $migrateLegacyConfig = static function (int $userCount) use ($writeGeneratedConfig): void {
     $generatedPath = ROOT . '/storage/config.generated.php';
     if (is_file($generatedPath)) {
@@ -103,12 +119,15 @@ $migrateLegacyConfig = static function (int $userCount) use ($writeGeneratedConf
         'name'          => AP_NAME,
         'description'   => AP_DESCRIPTION,
         'admin_email'   => AP_ADMIN_EMAIL,
+        'security_secret' => defined('AP_SECURITY_SECRET') ? AP_SECURITY_SECRET : bin2hex(random_bytes(32)),
         'base_url'      => AP_BASE_URL,
         'db_path'       => AP_DB_PATH,
         'media_dir'     => AP_MEDIA_DIR,
         'max_upload_mb' => AP_MAX_UPLOAD_MB,
         'open_reg'      => AP_OPEN_REG,
         'post_chars'    => AP_POST_CHARS,
+        'home_timeline_max_items' => defined('AP_HOME_TIMELINE_MAX_ITEMS') ? AP_HOME_TIMELINE_MAX_ITEMS : 800,
+        'list_timeline_max_items' => defined('AP_LIST_TIMELINE_MAX_ITEMS') ? AP_LIST_TIMELINE_MAX_ITEMS : 800,
         'debug'         => AP_DEBUG,
         'version'       => AP_VERSION,
         'software'      => AP_SOFTWARE,
@@ -123,6 +142,7 @@ $migrateLegacyConfig = static function (int $userCount) use ($writeGeneratedConf
 
 $userCount = \App\Models\DB::count('users');
 $migrateLegacyConfig($userCount);
+$ensureSecuritySecret();
 
 $apAllowInstall = defined('AP_ALLOW_INSTALL') ? (bool)AP_ALLOW_INSTALL : false;
 if ($apAllowInstall && $userCount === 0) {
@@ -136,7 +156,7 @@ if ($apAllowInstall && $userCount === 0) {
 // ── Security headers ─────────────────────────────────────────
 if (!headers_sent()) {
     header('X-Content-Type-Options: nosniff');
-    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; font-src 'self' data:; frame-ancestors 'self';");
+    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; font-src 'self' data:; frame-ancestors 'self';");
     if (!AP_DEBUG && is_https_request()) {
         header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
     }

@@ -364,29 +364,37 @@ class StatusModel
     {
         $blockedDomains = self::blockedDomains($userId);
         $domainFilter   = self::domainBlockSql('s.user_id', $blockedDomains);
+        $windowSize     = defined('AP_HOME_TIMELINE_MAX_ITEMS') ? max(1, (int)AP_HOME_TIMELINE_MAX_ITEMS) : 800;
 
-        $sql = "SELECT s.* FROM statuses s
-                WHERE (
-                    s.user_id=?
-                    OR s.user_id IN (
-                        SELECT following_id FROM follows WHERE follower_id=? AND pending=0
-                    )
-                    OR (
-                        s.id IN (
-                            SELECT sh.status_id FROM status_hashtags sh
-                            JOIN tag_follows tf ON tf.hashtag_id=sh.hashtag_id
-                            WHERE tf.user_id=?
+        $sql = "WITH home_window AS (
+                    SELECT s.id FROM statuses s
+                    WHERE (
+                        s.user_id=?
+                        OR s.user_id IN (
+                            SELECT following_id FROM follows WHERE follower_id=? AND pending=0
                         )
-                        AND s.visibility IN ('public','unlisted')
+                        OR (
+                            s.id IN (
+                                SELECT sh.status_id FROM status_hashtags sh
+                                JOIN tag_follows tf ON tf.hashtag_id=sh.hashtag_id
+                                WHERE tf.user_id=?
+                            )
+                            AND s.visibility IN ('public','unlisted')
+                        )
                     )
+                    AND s.visibility IN ('public','unlisted','private')
+                    AND (s.expires_at IS NULL OR s.expires_at='' OR s.expires_at>?)
+                    AND (s.user_id LIKE 'http%' OR s.user_id NOT IN (SELECT id FROM users WHERE is_suspended=1))
+                    AND s.user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)
+                    AND s.user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)
+                    {$domainFilter}
+                    ORDER BY s.created_at DESC, s.id DESC
+                    LIMIT ?
                 )
-                AND s.visibility IN ('public','unlisted','private')
-                AND (s.expires_at IS NULL OR s.expires_at='' OR s.expires_at>?)
-                AND (s.user_id LIKE 'http%' OR s.user_id NOT IN (SELECT id FROM users WHERE is_suspended=1))
-                AND s.user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)
-                AND s.user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)
-                {$domainFilter}";
-        $p = [$userId, $userId, $userId, now_iso(), $userId, $userId];
+                SELECT s.* FROM statuses s
+                JOIN home_window hw ON hw.id = s.id
+                WHERE 1=1";
+        $p = [$userId, $userId, $userId, now_iso(), $userId, $userId, $windowSize];
 
         // Paginação por (created_at, id) — cursor composto evita posts duplicados
         // quando há timestamps iguais.

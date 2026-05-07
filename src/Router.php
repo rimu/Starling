@@ -26,6 +26,9 @@ class Router
         $this->get('/users/:username/following',      'ActorCtrl@following');
         $this->get('/users/:username/outbox',         'ActorCtrl@outbox');
         $this->get('/users/:username/featured',       'ActorCtrl@featured');
+        $this->get('/users/:username/collections',    'ActorCtrl@collections');
+        $this->get('/users/:username/feature-authorizations/:id', 'ActorCtrl@featureAuthorization');
+        $this->get('/users/:username/tags',           'ActorCtrl@tags');
         $this->post('/users/:username/inbox',         'ActorCtrl@inbox');
 
         // ── ActivityPub objects / tags ────────────────────────
@@ -56,6 +59,12 @@ class Router
         $this->post('/api/v1/accounts',                      'Api\AccountsCtrl@register');
         $this->get('/api/v1/accounts/verify_credentials',    'Api\AccountsCtrl@verifyCredentials');
         $this->patch('/api/v1/accounts/update_credentials',  'Api\AccountsCtrl@updateCredentials');
+        $this->get('/api/v1/accounts/2fa',                   'Api\TwoFactorCtrl@status');
+        $this->post('/api/v1/accounts/2fa/setup',            'Api\TwoFactorCtrl@beginSetup');
+        $this->delete('/api/v1/accounts/2fa/setup',          'Api\TwoFactorCtrl@cancelSetup');
+        $this->post('/api/v1/accounts/2fa/confirm',          'Api\TwoFactorCtrl@confirmSetup');
+        $this->delete('/api/v1/accounts/2fa',                'Api\TwoFactorCtrl@disable');
+        $this->post('/api/v1/accounts/2fa/recovery_codes',   'Api\TwoFactorCtrl@regenerateRecoveryCodes');
         $this->get('/api/v1/accounts/relationships',         'Api\AccountsCtrl@relationships');
         $this->get('/api/v1/accounts/search',                'Api\AccountsCtrl@search');
         $this->get('/api/v1/accounts/lookup',                'Api\AccountsCtrl@lookup');

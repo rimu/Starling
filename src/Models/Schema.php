@@ -8,7 +8,7 @@ class Schema
     private static bool $done = false;
 
     /** Increment this when adding new tables or columns. */
-    public const SCHEMA_VERSION = 20;
+    public const SCHEMA_VERSION = 22;
 
     public static function install(): void
     {
@@ -58,7 +58,12 @@ class Schema
                   'preferences TEXT NOT NULL DEFAULT \'{}\'',
                   'fields TEXT NOT NULL DEFAULT \'[]\'',
                   'discoverable INTEGER NOT NULL DEFAULT 1',
-                  'indexable INTEGER NOT NULL DEFAULT 1'] as $col) {
+                  'indexable INTEGER NOT NULL DEFAULT 1',
+                  'two_factor_enabled INTEGER NOT NULL DEFAULT 0',
+                  'two_factor_secret TEXT NOT NULL DEFAULT \'\'',
+                  'two_factor_confirmed_at TEXT NOT NULL DEFAULT \'\'',
+                  'two_factor_recovery_codes TEXT NOT NULL DEFAULT \'[]\'',
+                  'two_factor_last_used_step INTEGER NOT NULL DEFAULT 0'] as $col) {
             try { $db->exec("ALTER TABLE users ADD COLUMN $col"); } catch (\Throwable) {}
         }
 
@@ -482,6 +487,24 @@ class Schema
             created_at TEXT NOT NULL,
             UNIQUE(user_id, name)
         )");
+
+        // Remote collection feature approvals for local accounts.
+        // These rows back the ActivityPub FeatureAuthorization objects that Mastodon
+        // fetches after a local account accepts a remote FeatureRequest.
+        $db->exec("CREATE TABLE IF NOT EXISTS collection_feature_authorizations (
+            id                    TEXT PRIMARY KEY,
+            user_id               TEXT NOT NULL,
+            remote_actor_id       TEXT NOT NULL,
+            remote_collection_uri TEXT NOT NULL,
+            activity_uri          TEXT NOT NULL,
+            state                 TEXT NOT NULL DEFAULT 'accepted',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL,
+            UNIQUE(user_id, activity_uri),
+            UNIQUE(user_id, remote_collection_uri)
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_cfa_user_state ON collection_feature_authorizations(user_id, state, updated_at DESC)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_cfa_remote_actor ON collection_feature_authorizations(remote_actor_id, updated_at DESC)");
 
         // Follow suggestions seed
         $db->exec("CREATE TABLE IF NOT EXISTS follow_suggestions (

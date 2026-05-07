@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Models\{DB, UserModel, StatusModel, PollModel};
+use App\Models\{DB, UserModel, StatusModel, PollModel, CollectionFeatureModel};
 use App\ActivityPub\{Builder, InboxProcessor};
 
 class ActorCtrl
@@ -1186,6 +1186,62 @@ HTML;
             'totalItems' => count($items),
             'orderedItems' => $items,
         ]);
+    }
+
+    public function tags(array $p): void
+    {
+        $u = UserModel::byUsername($p['username']);
+        if (!$u) err_out('Not found', 404);
+
+        $url = actor_url($u['username']) . '/tags';
+        $rows = DB::all(
+            'SELECT name FROM featured_tags WHERE user_id=? ORDER BY created_at DESC, name ASC LIMIT 10',
+            [$u['id']]
+        );
+
+        $items = array_map(static function (array $row): array {
+            $name = ltrim((string)($row['name'] ?? ''), '#');
+            return [
+                'type' => 'Hashtag',
+                'href' => ap_url('tags/' . rawurlencode($name)),
+                'name' => '#' . $name,
+            ];
+        }, $rows);
+
+        ap_json_out([
+            '@context'   => 'https://www.w3.org/ns/activitystreams',
+            'id'         => $url,
+            'type'       => 'Collection',
+            'totalItems' => count($items),
+            'items'      => $items,
+        ]);
+    }
+
+    public function collections(array $p): void
+    {
+        $u = UserModel::byUsername($p['username']);
+        if (!$u) err_out('Not found', 404);
+
+        $url = actor_url($u['username']) . '/collections';
+
+        ap_json_out([
+            '@context'   => 'https://www.w3.org/ns/activitystreams',
+            'id'         => $url,
+            'type'       => 'OrderedCollection',
+            'totalItems' => 0,
+            'orderedItems' => [],
+        ]);
+    }
+
+    public function featureAuthorization(array $p): void
+    {
+        $u = UserModel::byUsername($p['username']);
+        if (!$u) err_out('Not found', 404);
+
+        $authorization = CollectionFeatureModel::acceptedByIdForUser((string)$p['id'], (string)$u['id']);
+        if (!$authorization) err_out('Not found', 404);
+
+        ap_json_out(Builder::featureAuthorization($u, $authorization));
     }
 
     public function inbox(array $p): void

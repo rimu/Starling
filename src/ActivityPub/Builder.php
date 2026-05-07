@@ -14,14 +14,33 @@ class Builder
             'Hashtag'     => 'as:Hashtag',
             'toot'        => 'http://joinmastodon.org/ns#',
             'Emoji'       => 'toot:Emoji',
+            'featured'    => ['@id' => 'http://joinmastodon.org/ns#featured', '@type' => '@id'],
             'discoverable'=> 'toot:discoverable',
             'indexable'   => 'toot:indexable',
             'featuredTags' => ['@id' => 'http://joinmastodon.org/ns#featuredTags', '@type' => '@id'],
+            'featuredCollections' => ['@id' => 'http://joinmastodon.org/ns#featuredCollections', '@type' => '@id'],
+            'attributionDomains' => ['@id' => 'http://joinmastodon.org/ns#attributionDomains', '@type' => '@id'],
+            'showFeatured' => 'toot:showFeatured',
+            'showMedia' => 'toot:showMedia',
+            'showRepliesInMedia' => 'toot:showRepliesInMedia',
+            'FeatureRequest' => 'toot:FeatureRequest',
+            'FeatureAuthorization' => 'toot:FeatureAuthorization',
+            'FeaturedItem' => 'toot:FeaturedItem',
+            'featuredObject' => ['@id' => 'toot:featuredObject', '@type' => '@id'],
+            'featuredObjectType' => 'toot:featuredObjectType',
+            'featureAuthorization' => ['@id' => 'toot:featureAuthorization', '@type' => '@id'],
+            'interactionTarget' => ['@id' => 'toot:interactionTarget', '@type' => '@id'],
+            'interactingObject' => ['@id' => 'toot:interactingObject', '@type' => '@id'],
             'schema'      => 'http://schema.org#',
             'PropertyValue' => 'schema:PropertyValue',
             'value'       => 'schema:value',
             'fedibird'    => 'http://fedibird.com/ns#',
             'quoteUri'    => ['@id' => 'fedibird:quoteUri', '@type' => '@id'],
+            'gts'         => 'https://gotosocial.org/ns#',
+            'interactionPolicy' => ['@id' => 'gts:interactionPolicy', '@type' => '@id'],
+            'canFeature'  => 'gts:canFeature',
+            'automaticApproval' => ['@id' => 'gts:automaticApproval', '@type' => '@id'],
+            'manualApproval' => ['@id' => 'gts:manualApproval', '@type' => '@id'],
         ],
     ];
 
@@ -48,6 +67,7 @@ class Builder
             'inbox'     => "$url/inbox",
             'outbox'    => "$url/outbox",
             'featured'  => "$url/featured",
+            'featuredCollections' => "$url/collections",
             'featuredTags' => "$url/tags",
             'endpoints' => ['sharedInbox' => ap_url('inbox')],
             'preferredUsername' => $u['username'],
@@ -58,6 +78,18 @@ class Builder
             'manuallyApprovesFollowers' => (bool)$u['is_locked'],
             'discoverable' => (bool)($u['discoverable'] ?? 1),
             'indexable'    => (bool)($u['indexable'] ?? 1),
+            'showFeatured' => true,
+            'showMedia'    => true,
+            'showRepliesInMedia' => true,
+            'interactionPolicy' => [
+                'canFeature' => [
+                    'automaticApproval' => ((bool)($u['discoverable'] ?? 1))
+                        ? ['https://www.w3.org/ns/activitystreams#Public']
+                        : [],
+                    'manualApproval' => [],
+                ],
+            ],
+            'attributionDomains' => [],
             'publicKey' => [
                 'id'           => "$url#main-key",
                 'owner'        => $url,
@@ -341,6 +373,45 @@ class Builder
             'actor'    => actor_url($actor['username']),
             'to'       => $to,
             'object'   => $followActivity,
+        ];
+    }
+
+    public static function acceptFeatureRequest(array $actor, array $authorization): array
+    {
+        $actorUrl = actor_url((string)$actor['username']);
+        $authUrl = \App\Models\CollectionFeatureModel::authorizationUrl($actor, $authorization);
+        return [
+            '@context' => self::CTX,
+            'type' => 'Accept',
+            'id' => $actorUrl . '#accepts/feature_requests/' . rawurlencode((string)$authorization['id']),
+            'actor' => $actorUrl,
+            'to' => [(string)$authorization['remote_actor_id']],
+            'object' => (string)$authorization['activity_uri'],
+            'result' => $authUrl,
+        ];
+    }
+
+    public static function rejectFeatureRequest(array $actor, string $remoteActorId, string $activityUri): array
+    {
+        $actorUrl = actor_url((string)$actor['username']);
+        return [
+            '@context' => self::CTX,
+            'type' => 'Reject',
+            'id' => $actorUrl . '#rejects/feature_requests/' . md5($activityUri),
+            'actor' => $actorUrl,
+            'to' => [$remoteActorId],
+            'object' => $activityUri,
+        ];
+    }
+
+    public static function featureAuthorization(array $actor, array $authorization): array
+    {
+        return [
+            '@context' => self::CTX,
+            'id' => \App\Models\CollectionFeatureModel::authorizationUrl($actor, $authorization),
+            'type' => 'FeatureAuthorization',
+            'interactionTarget' => actor_url((string)$actor['username']),
+            'interactingObject' => (string)$authorization['remote_collection_uri'],
         ];
     }
 

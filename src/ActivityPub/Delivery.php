@@ -691,6 +691,17 @@ class Delivery
     }
 
     /**
+     * Queue an activity to a specific remote actor inbox, bypassing sharedInbox.
+     * Collections feature-request replies need to target the actor inbox directly
+     * to match Mastodon's own delivery behavior.
+     */
+    public static function queueToActorInbox(array $sender, array $remoteActor, array $activity): void
+    {
+        $inbox = $remoteActor['inbox_url'] ?: $remoteActor['shared_inbox'];
+        if ($inbox) self::enqueue($sender, $inbox, $activity);
+    }
+
+    /**
      * Store a failed delivery in the retry queue.
      * Uses INSERT OR IGNORE so duplicate entries are not created.
      */

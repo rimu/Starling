@@ -170,23 +170,31 @@ class TimelinesCtrl
 
         $blockedDomains = StatusModel::blockedDomains($user['id']);
         $domainFilter   = StatusModel::domainBlockSql('user_id', $blockedDomains);
+        $windowSize     = defined('AP_LIST_TIMELINE_MAX_ITEMS') ? max(1, (int)AP_LIST_TIMELINE_MAX_ITEMS) : 800;
 
         $phs = implode(',', array_fill(0, count($acctIds), '?'));
-        $sql = "SELECT * FROM statuses WHERE user_id IN ($phs)"
+        $sql = "WITH list_window AS (
+                    SELECT id, created_at FROM statuses
+                    WHERE user_id IN ($phs)"
              . " AND (visibility IN ('public','unlisted') OR (visibility='private' AND user_id IN (SELECT following_id FROM follows WHERE follower_id=? AND pending=0)))"
              . " AND (expires_at IS NULL OR expires_at='' OR expires_at>?)"
              . " AND (user_id LIKE 'http%' OR user_id NOT IN (SELECT id FROM users WHERE is_suspended=1))"
              . " AND user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)"
              . " AND user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)"
-             . $domainFilter;
-        $par = array_merge($acctIds, [$user['id'], now_iso(), $user['id'], $user['id']]);
+             . $domainFilter
+             . " ORDER BY created_at DESC, id DESC LIMIT ?
+                )
+                SELECT s.* FROM statuses s
+                JOIN list_window lw ON lw.id = s.id
+                WHERE 1=1";
+        $par = array_merge($acctIds, [$user['id'], now_iso(), $user['id'], $user['id'], $windowSize]);
         if ($maxId) {
             $ref = DB::one('SELECT created_at, id FROM statuses WHERE id=?', [$maxId]);
             if (!$ref && ctype_digit($maxId)) {
                 $ms  = ((int)$maxId >> 16) + 1262304000000;
                 $ref = ['created_at' => gmdate('Y-m-d\TH:i:s.000\Z', (int)($ms / 1000)), 'id' => $maxId];
             }
-            if ($ref) { $sql .= ' AND (created_at < ? OR (created_at = ? AND id < ?))'; $par[] = $ref['created_at']; $par[] = $ref['created_at']; $par[] = $ref['id']; }
+            if ($ref) { $sql .= ' AND (s.created_at < ? OR (s.created_at = ? AND s.id < ?))'; $par[] = $ref['created_at']; $par[] = $ref['created_at']; $par[] = $ref['id']; }
         }
         if ($sinceId) {
             $ref = DB::one('SELECT created_at, id FROM statuses WHERE id=?', [$sinceId]);
@@ -194,7 +202,7 @@ class TimelinesCtrl
                 $ms  = ((int)$sinceId >> 16) + 1262304000000;
                 $ref = ['created_at' => gmdate('Y-m-d\TH:i:s.000\Z', (int)($ms / 1000)), 'id' => $sinceId];
             }
-            if ($ref) { $sql .= ' AND (created_at > ? OR (created_at = ? AND id > ?))'; $par[] = $ref['created_at']; $par[] = $ref['created_at']; $par[] = $ref['id']; }
+            if ($ref) { $sql .= ' AND (s.created_at > ? OR (s.created_at = ? AND s.id > ?))'; $par[] = $ref['created_at']; $par[] = $ref['created_at']; $par[] = $ref['id']; }
         }
         if ($minId) {
             $ref = DB::one('SELECT created_at, id FROM statuses WHERE id=?', [$minId]);
@@ -203,11 +211,11 @@ class TimelinesCtrl
                 $ref = ['created_at' => gmdate('Y-m-d\TH:i:s.000\Z', (int)($ms / 1000)), 'id' => $minId];
             }
             if ($ref) {
-                $sql .= ' AND (created_at > ? OR (created_at = ? AND id > ?))';
+                $sql .= ' AND (s.created_at > ? OR (s.created_at = ? AND s.id > ?))';
                 $par[] = $ref['created_at']; $par[] = $ref['created_at']; $par[] = $ref['id'];
             }
         }
-        $sql .= $minId ? ' ORDER BY created_at ASC, id ASC LIMIT ?' : ' ORDER BY created_at DESC, id DESC LIMIT ?';
+        $sql .= $minId ? ' ORDER BY s.created_at ASC, s.id ASC LIMIT ?' : ' ORDER BY s.created_at DESC, s.id DESC LIMIT ?';
         $par[] = $limit;
 
         $rows = DB::all($sql, $par);

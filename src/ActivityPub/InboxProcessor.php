@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\ActivityPub;
 
-use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, CryptoModel, PollModel};
+use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, CryptoModel, PollModel, CollectionFeatureModel};
 
 class InboxProcessor
 {
@@ -222,6 +222,16 @@ class InboxProcessor
             }
         }
 
+        // Mastodon's FeatureRequest activities do not include an explicit `actor`.
+        // After signature verification, promote the verified signer actor so later
+        // routing/dispatch logic can still resolve the remote account correctly.
+        if ($actorId === '' && $httpSigOk) {
+            $derivedActor = trim((string)($httpSigResult['actor_url'] ?? ''));
+            if ($derivedActor !== '') {
+                $actorId = $derivedActor;
+            }
+        }
+
         // ── 3. Log ────────────────────────────────────────────
         self::log($actorId, $type, $activity, $sigError, $headers, [], $requestMeta);
 
@@ -234,6 +244,7 @@ class InboxProcessor
             'Update'   => self::onUpdate($activity, $actorId),
             'Delete'   => self::onDelete($activity, $actorId),
             'Follow'   => self::onFollow($activity, $actorId),
+            'FeatureRequest' => self::onFeatureRequest($activity, $actorId),
             'Undo'     => self::onUndo($activity, $actorId),
             'Accept'   => self::onAccept($activity, $actorId),
             'Reject'   => self::onReject($activity, $actorId),
@@ -1279,6 +1290,49 @@ class InboxProcessor
         return false;
     }
 
+    private static function onFeatureRequest(array $a, string $actorId): bool
+    {
+        $activityUri = trim((string)($a['id'] ?? ''));
+        $targetUrl = is_string($a['object'] ?? null)
+            ? trim((string)$a['object'])
+            : trim((string)($a['object']['id'] ?? ''));
+        $collectionUri = trim((string)($a['instrument'] ?? ''));
+        if ($activityUri === '' || $targetUrl === '' || $collectionUri === '' || $actorId === '') {
+            return false;
+        }
+
+        $target = self::resolveLocalUser($targetUrl);
+        if (!$target) return false;
+
+        $remoteActor = RemoteActorModel::fetch($actorId);
+        if (!$remoteActor) return false;
+
+        if (!self::isAcceptableFeatureRequestCollection($collectionUri, $actorId)) {
+            $reject = Builder::rejectFeatureRequest($target, $actorId, $activityUri);
+            Delivery::queueToActor($target, $remoteActor, $reject);
+            return true;
+        }
+
+        $discoverable = (bool)($target['discoverable'] ?? 1);
+        $authorization = CollectionFeatureModel::upsertDecision(
+            (string)$target['id'],
+            $actorId,
+            $collectionUri,
+            $activityUri,
+            $discoverable ? 'accepted' : 'rejected'
+        );
+
+        if ($discoverable) {
+            $accept = Builder::acceptFeatureRequest($target, $authorization);
+            Delivery::queueToActorInbox($target, $remoteActor, $accept);
+        } else {
+            $reject = Builder::rejectFeatureRequest($target, $actorId, $activityUri);
+            Delivery::queueToActorInbox($target, $remoteActor, $reject);
+        }
+
+        return true;
+    }
+
     private static function onAccept(array $a, string $actorId): bool
     {
         $inner = $a['object'] ?? null;
@@ -1346,6 +1400,15 @@ class InboxProcessor
         $row = DB::one('SELECT pending FROM follows WHERE follower_id=? AND following_id=?', [$follower['id'], $actorId]);
         if (!$row || !(int)$row['pending']) return true;
         DB::delete('follows', 'follower_id=? AND following_id=?', [$follower['id'], $actorId]);
+        return true;
+    }
+
+    private static function isAcceptableFeatureRequestCollection(string $collectionUri, string $actorId): bool
+    {
+        if (!preg_match('#^https?://#i', $collectionUri)) return false;
+        $collectionHost = strtolower((string)(parse_url($collectionUri, PHP_URL_HOST) ?? ''));
+        $actorHost = strtolower((string)(parse_url($actorId, PHP_URL_HOST) ?? ''));
+        if ($collectionHost === '' || $actorHost === '' || $collectionHost !== $actorHost) return false;
         return true;
     }
 

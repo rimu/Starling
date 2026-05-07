@@ -1148,6 +1148,7 @@ HTML;
             'name'          => $siteName,
             'description'   => $description,
             'admin_email'   => $adminEmail,
+            'security_secret' => bin2hex(random_bytes(32)),
             'base_url'      => $baseUrl,
             'db_path'       => ROOT . '/storage/db/activitypub.sqlite',
             'media_dir'     => ROOT . '/storage/media',

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Models\{AdminModel, UserModel, DB};
+use App\Models\{AdminModel, DB, TwoFactorModel, UserModel};
 
 /**
  * Administration panel — /admin/*
@@ -11,6 +11,53 @@ use App\Models\{AdminModel, UserModel, DB};
  */
 class AdminCtrl
 {
+    private function pendingAdminUser(): ?array
+    {
+        $pending = $_SESSION['admin_2fa'] ?? null;
+        if (!is_array($pending)) return null;
+        $startedAt = (int)($pending['started_at'] ?? 0);
+        if ($startedAt < (time() - 600)) {
+            unset($_SESSION['admin_2fa']);
+            return null;
+        }
+        $userId = trim((string)($pending['user_id'] ?? ''));
+        if ($userId === '') {
+            unset($_SESSION['admin_2fa']);
+            return null;
+        }
+        $user = UserModel::byId($userId);
+        if (!$user || empty($user['is_admin']) || !TwoFactorModel::isEnabled($user) || !empty($user['is_suspended'])) {
+            unset($_SESSION['admin_2fa']);
+            return null;
+        }
+        return $user;
+    }
+
+    private function beginPendingAdminLogin(array $user): void
+    {
+        $_SESSION['admin_2fa'] = [
+            'user_id' => (string)$user['id'],
+            'started_at' => time(),
+        ];
+    }
+
+    private function completeAdminLogin(array $user): never
+    {
+        unset($_SESSION['admin_2fa']);
+        session_regenerate_id(true);
+        $_SESSION['admin_user_id'] = $user['id'];
+        $_SESSION['admin_username'] = $user['username'];
+        $_SESSION['admin_ip'] = $_SERVER['REMOTE_ADDR'] ?? '';
+        $this->redirect('/admin');
+    }
+
+    private function verifyAdminSecondFactor(array $user, string $code, string $recoveryCode): bool
+    {
+        if ($code !== '' && TwoFactorModel::verifyCode($user, $code, true)) return true;
+        if ($recoveryCode !== '' && TwoFactorModel::consumeRecoveryCode($user, $recoveryCode)) return true;
+        return false;
+    }
+
     private function generatedConfigPath(): string
     {
         return ROOT . '/storage/config.generated.php';
@@ -67,6 +114,9 @@ class AdminCtrl
     {
         AdminModel::startSession();
         if (AdminModel::isLoggedIn()) { $this->redirect('/admin'); }
+        if (($_GET['reset'] ?? '') === '1') {
+            unset($_SESSION['admin_2fa']);
+        }
 
         // Ensure a CSRF token exists before rendering the form or handling POST.
         if (empty($_SESSION['csrf'])) {
@@ -75,23 +125,42 @@ class AdminCtrl
 
         $error = '';
         $ip    = $_SERVER['REMOTE_ADDR'] ?? '';
+        $pendingUser = $this->pendingAdminUser();
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $csrf = $_POST['csrf'] ?? '';
             if (!$csrf || !hash_equals($_SESSION['csrf'], $csrf)) {
                 $error = 'Invalid request.';
             } elseif ($this->checkRateLimit($ip)) {
                 $error = 'Too many failed attempts. Wait 15 minutes.';
-            } elseif (AdminModel::login($_POST['username'] ?? '', $_POST['password'] ?? '')) {
-                $this->redirect('/admin');
+            } elseif ($pendingUser) {
+                $code = trim((string)($_POST['code'] ?? ''));
+                $recoveryCode = trim((string)($_POST['recovery_code'] ?? ''));
+                if ($this->verifyAdminSecondFactor($pendingUser, $code, $recoveryCode)) {
+                    $this->completeAdminLogin(UserModel::byId((string)$pendingUser['id']) ?? $pendingUser);
+                } else {
+                    sleep(1);
+                    $this->recordFailedAttempt($ip);
+                    $error = 'Invalid authenticator or recovery code.';
+                }
             } else {
-                sleep(1);
-                $this->recordFailedAttempt($ip);
-                $error = 'Invalid credentials or missing administrator permissions.';
+                $user = UserModel::verify($_POST['username'] ?? '', $_POST['password'] ?? '');
+                if ($user && !empty($user['is_admin']) && empty($user['is_suspended'])) {
+                    if (TwoFactorModel::isEnabled($user)) {
+                        $this->beginPendingAdminLogin($user);
+                        $pendingUser = $user;
+                    } else {
+                        $this->completeAdminLogin($user);
+                    }
+                } else {
+                    sleep(1);
+                    $this->recordFailedAttempt($ip);
+                    $error = 'Invalid credentials or missing administrator permissions.';
+                }
             }
         }
         // Rotate token after each use so it cannot be reused
         $_SESSION['csrf'] = bin2hex(random_bytes(16));
-        $this->html($this->loginPage($_SESSION['csrf'], $error));
+        $this->html($pendingUser ? $this->twoFactorLoginPage($_SESSION['csrf'], $error, (string)$pendingUser['username']) : $this->loginPage($_SESSION['csrf'], $error));
     }
 
     public function logout(array $p): void
@@ -519,6 +588,8 @@ class AdminCtrl
         $sourceUrl = rtrim(trim((string)($_POST['source_url'] ?? '')), '/');
         $atprotoDid = trim((string)($_POST['atproto_did'] ?? ''));
         $oauthTokenTtlDays = max(0, min(3650, (int)($_POST['oauth_token_ttl_days'] ?? 0)));
+        $homeTimelineMaxItems = max(1, min(10000, (int)($_POST['home_timeline_max_items'] ?? 800)));
+        $listTimelineMaxItems = max(1, min(10000, (int)($_POST['list_timeline_max_items'] ?? 800)));
         $openReg = !empty($_POST['open_reg']);
 
         $scheme = (string)parse_url($baseUrl, PHP_URL_SCHEME);
@@ -564,6 +635,8 @@ class AdminCtrl
         $current['source_url'] = $sourceUrl !== '' ? $sourceUrl : $baseUrl;
         $current['atproto_did'] = $atprotoDid;
         $current['oauth_token_ttl_days'] = $oauthTokenTtlDays;
+        $current['home_timeline_max_items'] = $homeTimelineMaxItems;
+        $current['list_timeline_max_items'] = $listTimelineMaxItems;
 
         $this->writeGeneratedConfig($current);
         $admin = AdminModel::currentAdmin();
@@ -573,7 +646,7 @@ class AdminCtrl
             'instance',
             AP_DOMAIN,
             'Updated instance settings.',
-            ['site_name' => $siteName, 'base_url' => $baseUrl, 'admin_email' => strtolower($adminEmail), 'open_reg' => $openReg, 'oauth_token_ttl_days' => $oauthTokenTtlDays]
+            ['site_name' => $siteName, 'base_url' => $baseUrl, 'admin_email' => strtolower($adminEmail), 'open_reg' => $openReg, 'oauth_token_ttl_days' => $oauthTokenTtlDays, 'home_timeline_max_items' => $homeTimelineMaxItems, 'list_timeline_max_items' => $listTimelineMaxItems]
         );
         $this->flash('success', 'Instance settings saved. Reload the app to see all changes reflected everywhere.');
         $this->redirect('/admin/settings');
@@ -1977,6 +2050,8 @@ HTML;
         $sourceUrl = $generated['source_url'] ?? AP_SOURCE_URL;
         $atprotoDid = $generated['atproto_did'] ?? AP_ATPROTO_DID;
         $oauthTokenTtlDays = (int)($generated['oauth_token_ttl_days'] ?? oauth_token_ttl_days());
+        $homeTimelineMaxItems = (int)($generated['home_timeline_max_items'] ?? (defined('AP_HOME_TIMELINE_MAX_ITEMS') ? AP_HOME_TIMELINE_MAX_ITEMS : 800));
+        $listTimelineMaxItems = (int)($generated['list_timeline_max_items'] ?? (defined('AP_LIST_TIMELINE_MAX_ITEMS') ? AP_LIST_TIMELINE_MAX_ITEMS : 800));
         $openReg = !empty($generated['open_reg']) || AP_OPEN_REG;
         $openChecked = $openReg ? ' checked' : '';
         $health = runtime_health_report(true);
@@ -2058,6 +2133,14 @@ HTML;
       <label>OAuth token max age (days)</label>
       <input type="number" min="0" max="3650" name="oauth_token_ttl_days" value="{$e($oauthTokenTtlDays)}" placeholder="0">
     </div>
+    <div class="form-group" style="min-width:220px">
+      <label>Home timeline window</label>
+      <input type="number" min="1" max="10000" name="home_timeline_max_items" value="{$e($homeTimelineMaxItems)}" placeholder="800">
+    </div>
+    <div class="form-group" style="min-width:220px">
+      <label>List timeline window</label>
+      <input type="number" min="1" max="10000" name="list_timeline_max_items" value="{$e($listTimelineMaxItems)}" placeholder="800">
+    </div>
     <div class="form-group" style="min-width:180px">
       <label>&nbsp;</label>
       <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;text-transform:none;letter-spacing:0">
@@ -2076,6 +2159,8 @@ HTML;
   <div class="card" style="max-width:860px">
     <div class="card-sub">These settings are stored in <code>storage/config.generated.php</code>. Changing the base URL or domain after federation has already started can break identifiers and remote references, so do that only with care.</div>
     <div class="card-sub" style="margin-top:.55rem">OAuth token max age is disabled when set to <code>0</code>. When enabled, tokens are revoked lazily on their next authenticated use.</div>
+    <div class="card-sub" style="margin-top:.55rem">Home timeline window limits the total number of most-recent eligible posts exposed by <code>/api/v1/timelines/home</code> before normal pagination is applied. Older posts fall out of the visible window, similar to Mastodon&apos;s bounded home feed behavior.</div>
+    <div class="card-sub" style="margin-top:.55rem">List timeline window does the same for <code>/api/v1/timelines/list/:id</code>, so old list posts also fall out of the visible window instead of remaining infinitely pageable.</div>
   </div>
 </div>
 HTML;
@@ -2836,6 +2921,62 @@ nav .logo{font-size:1rem;font-weight:800;color:var(--blue);text-decoration:none}
   </div>
 </div>
 </body></html>
+HTML;
+    }
+
+    private function twoFactorLoginPage(string $csrf, string $error, string $username): string
+    {
+        $e = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $csrf = $e($csrf);
+        $user = $e($username);
+        $domain = $e(AP_DOMAIN);
+        $errorHtml = $error !== ''
+            ? '<div class="flash flash-error">' . $e($error) . '</div>'
+            : '';
+
+        return <<<HTML
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin 2FA — {$domain}</title>
+<link rel="icon" href="{$e(\site_favicon_url())}">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#fff;--surface:#fff;--hover:#F3F3F8;--blue:#0085FF;--blue2:#0070E0;--blue-bg:#E0EDFF;--border:#E5E7EB;--text:#0F1419;--text2:#66788A;--text3:#8D99A5;--red:#EC4040}
+@media(prefers-color-scheme:dark){:root{--bg:#0A0E14;--surface:#161823;--hover:#1E2030;--border:#2E3039;--text:#F1F3F5;--text2:#7B8794;--text3:#545864;--blue-bg:#0C1B3A}}
+body{font-family:'Inter',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+nav{background:color-mix(in srgb,var(--surface) 85%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:.75rem 1.5rem;display:flex;align-items:center;gap:.5rem;position:fixed;top:0;left:0;right:0;z-index:10}
+nav .fedi-symbol{font-size:1.4rem;color:var(--blue);line-height:1}
+nav .logo{font-size:1rem;font-weight:800;color:var(--blue);text-decoration:none}
+.wrap{width:100%;max-width:400px;margin-top:3rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem}
+.card-title{font-size:.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.07em;margin-bottom:1.5rem}
+.field{margin-bottom:1rem}
+.field label{display:block;font-size:.8rem;font-weight:600;color:var(--text2);margin-bottom:.4rem}
+.field input{width:100%;padding:.65rem .9rem;background:var(--surface);border:1px solid var(--border);border-radius:9999px;color:var(--text);font-size:.95rem;outline:none;transition:border .15s,box-shadow .15s;font-family:inherit}
+.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-bg)}
+.flash{padding:.65rem 1rem;border-radius:8px;font-size:.85rem;border-left:3px solid;margin-bottom:1.2rem;background:color-mix(in srgb,var(--red) 8%,var(--surface));border-color:var(--red);color:var(--red)}
+.submit{width:100%;margin-top:1.4rem;padding:.75rem;background:var(--blue);border:none;border-radius:9999px;color:#fff;font-size:.95rem;font-weight:700;cursor:pointer;transition:background .15s;font-family:inherit}
+.submit:hover{background:var(--blue2)}
+.hero{text-align:center;margin-bottom:2rem}
+.hero h1{font-size:1.5rem;font-weight:800;letter-spacing:-.03em;margin-bottom:.3rem}
+.hero p{color:var(--text2);font-size:.9rem}
+.helper{margin-top:1rem;color:var(--text2);font-size:.88rem;text-align:center}
+</style></head><body>
+<nav><span class="fedi-symbol">⋰⋱</span><a class="logo" href="/">Starling</a></nav>
+<div class="wrap"><div class="hero">
+<h1>Two-factor authentication</h1>
+<p>Continue as <strong>@{$user}</strong></p>
+</div><div class="card">
+<div class="card-title">Administrator verification</div>
+{$errorHtml}
+<form method="post">
+<input type="hidden" name="csrf" value="{$csrf}">
+<div class="field"><label>Authenticator code</label><input name="code" type="text" inputmode="numeric" autocomplete="one-time-code"></div>
+<div class="field"><label>Recovery code</label><input name="recovery_code" type="text" placeholder="Use only if you cannot access your authenticator"></div>
+<button class="submit">Verify</button>
+</form>
+<p class="helper"><a href="/admin/login?reset=1">Start over</a></p>
+</div></div></body></html>
 HTML;
     }
 
