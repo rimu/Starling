@@ -782,6 +782,20 @@ class AdminCtrl
                     ? 'Automatic maintenance enabled.'
                     : 'Automatic maintenance disabled.';
             })(),
+            'replay_quote_requests' => (function() use (&$postResponse) {
+                $limit = max(1, min(5000, (int)($_POST['limit'] ?? 500)));
+                $r = AdminModel::replayAcceptedQuoteRequests($limit);
+                if ((int)$r['processed'] > 0) {
+                    $postResponse = static function () use ($r): void {
+                        try {
+                            \App\ActivityPub\Delivery::processRetryQueue(min(max((int)$r['processed'], 1), 50));
+                        } catch (\Throwable $e) {
+                            error_log('Quote authorization replay queue drain failed: ' . $e->getMessage());
+                        }
+                    };
+                }
+                return "Quote authorization replay checked <strong>{$r['seen']}</strong> logged requests: <strong>{$r['processed']}</strong> queued, <strong>{$r['already_authorized']}</strong> already authorized, <strong>{$r['invalid']}</strong> invalid, <strong>{$r['failed']}</strong> failed.";
+            })(),
             'vacuum' => (function() use (&$postResponse) {
                 $postResponse = static function (): void {
                     try { AdminModel::vacuumWithLock(); } catch (\Throwable $e) {
@@ -2576,6 +2590,18 @@ HTML;
     <table><thead><tr><th>Table</th><th>Rows</th></tr></thead>
     <tbody>{$tableRows}</tbody></table>
   </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Recovery tools</div>
+  <p style="max-width:680px;color:var(--text2);font-size:.85rem;line-height:1.5;margin-bottom:.8rem">
+    Rare one-off federation repairs for protocol transitions. These should not be part of normal maintenance.
+  </p>
+  <form method="POST" action="/admin/maintenance" style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+    <input type="hidden" name="action" value="replay_quote_requests">
+    <input type="number" name="limit" value="500" min="1" max="5000" style="width:7rem">
+    <button class="btn btn-ghost">Replay quote authorizations</button>
+  </form>
 </div>
 HTML;
     }

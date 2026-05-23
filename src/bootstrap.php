@@ -49,8 +49,12 @@ $ensurePublicDirDenyRules();
 $persistInstallSecurityReport = static function (): void {
     $dir = ROOT . '/storage/runtime';
     if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    $path = $dir . '/install_security_report.json';
+    if (is_file($path) && (int)@filemtime($path) > time() - 300) {
+        return;
+    }
     @file_put_contents(
-        $dir . '/install_security_report.json',
+        $path,
         json_encode(install_security_report(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         LOCK_EX
     );

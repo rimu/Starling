@@ -875,6 +875,72 @@ class AdminModel
         ];
     }
 
+    public static function replayAcceptedQuoteRequests(int $limit = 500, bool $dryRun = false): array
+    {
+        $limit = max(1, min(5000, $limit));
+        \App\Models\Schema::ensureCriticalBackfillsNow();
+
+        $rows = DB::all(
+            "SELECT id, actor_url, raw_json, created_at
+               FROM inbox_log
+              WHERE type='QuoteRequest'
+                AND error=''
+                AND disposition='accepted'
+              ORDER BY created_at ASC
+              LIMIT ?",
+            [$limit]
+        );
+
+        $seen = 0;
+        $invalid = 0;
+        $already = 0;
+        $processed = 0;
+        $failed = 0;
+
+        foreach ($rows as $row) {
+            $seen++;
+            $activity = json_decode((string)($row['raw_json'] ?? ''), true);
+            if (!is_array($activity) || (string)($activity['type'] ?? '') !== 'QuoteRequest') {
+                $invalid++;
+                continue;
+            }
+
+            $activityUri = is_string($activity['id'] ?? null) ? trim((string)$activity['id']) : '';
+            if ($activityUri === '') {
+                $invalid++;
+                continue;
+            }
+
+            if (DB::one('SELECT 1 FROM quote_authorizations WHERE activity_uri=? LIMIT 1', [$activityUri])) {
+                $already++;
+                continue;
+            }
+
+            if ($dryRun) {
+                $processed++;
+                continue;
+            }
+
+            $ok = \App\ActivityPub\InboxProcessor::processTrustedLoggedQuoteRequest(
+                $activity,
+                (string)($row['actor_url'] ?? '')
+            );
+            if ($ok) {
+                $processed++;
+            } else {
+                $failed++;
+            }
+        }
+
+        return [
+            'seen' => $seen,
+            'processed' => $processed,
+            'already_authorized' => $already,
+            'invalid' => $invalid,
+            'failed' => $failed,
+        ];
+    }
+
     // ── Manutenção / limpeza ─────────────────────────────────
 
     /**

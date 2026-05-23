@@ -28,6 +28,7 @@ class Router
         $this->get('/users/:username/featured',       'ActorCtrl@featured');
         $this->get('/users/:username/collections',    'ActorCtrl@collections');
         $this->get('/users/:username/feature-authorizations/:id', 'ActorCtrl@featureAuthorization');
+        $this->get('/users/:username/quote-authorizations/:id', 'ActorCtrl@quoteAuthorization');
         $this->get('/users/:username/tags',           'ActorCtrl@tags');
         $this->post('/users/:username/inbox',         'ActorCtrl@inbox');
 

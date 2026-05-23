@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Models\{DB, UserModel, StatusModel, PollModel, CollectionFeatureModel};
+use App\Models\{DB, UserModel, StatusModel, PollModel, CollectionFeatureModel, QuoteAuthorizationModel};
 use App\ActivityPub\{Builder, InboxProcessor};
 
 class ActorCtrl
@@ -1256,6 +1256,20 @@ HTML;
         if (!$authorization) err_out('Not found', 404);
 
         ap_json_out(Builder::featureAuthorization($u, $authorization));
+    }
+
+    public function quoteAuthorization(array $p): void
+    {
+        $u = UserModel::byUsername($p['username']);
+        if (!$u) err_out('Not found', 404);
+
+        $authorization = QuoteAuthorizationModel::acceptedByIdForUser((string)$p['id'], (string)$u['id']);
+        if (!$authorization) err_out('Not found', 404);
+
+        $quoted = StatusModel::byId((string)$authorization['quoted_status_id']);
+        if (!$quoted || !StatusModel::canView($quoted, null)) err_out('Not found', 404);
+
+        ap_json_out(Builder::quoteAuthorization($u, $authorization));
     }
 
     public function inbox(array $p): void

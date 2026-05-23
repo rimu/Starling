@@ -819,8 +819,8 @@ function install_security_probe(string $url): array
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_TIMEOUT => 8,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
         CURLOPT_USERAGENT => 'Starling-Install-Check/1.0',
     ]);
     curl_exec($ch);

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\ActivityPub;
 
-use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, CryptoModel, PollModel, CollectionFeatureModel};
+use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, CryptoModel, PollModel, CollectionFeatureModel, QuoteAuthorizationModel};
 
 class InboxProcessor
 {
@@ -87,7 +87,7 @@ class InboxProcessor
 
     private static function canDeriveMissingActorFromSignature(string $type): bool
     {
-        return $type === 'FeatureRequest';
+        return in_array($type, ['FeatureRequest', 'QuoteRequest'], true);
     }
 
     private static function verifyActivityActorProof(array $activity, string $actorId): array
@@ -1037,6 +1037,7 @@ class InboxProcessor
             'Delete'   => self::onDelete($activityForDispatch, $actorId),
             'Follow'   => self::onFollow($activityForDispatch, $actorId),
             'FeatureRequest' => self::onFeatureRequest($activityForDispatch, $actorId),
+            'QuoteRequest' => self::onQuoteRequest($activityForDispatch, $actorId),
             'Undo'     => self::onUndo($activityForDispatch, $actorId),
             'Accept'   => self::onAccept($activityForDispatch, $actorId),
             'Reject'   => self::onReject($activityForDispatch, $actorId),
@@ -1048,6 +1049,24 @@ class InboxProcessor
     }
 
     // ── Handlers ─────────────────────────────────────────────
+
+    /**
+     * Replays a QuoteRequest that was already accepted into inbox_log before
+     * QuoteRequest dispatch existed. This deliberately bypasses HTTP-signature
+     * freshness, so callers must only pass previously accepted/trusted log rows.
+     */
+    public static function processTrustedLoggedQuoteRequest(array $activity, string $actorId): bool
+    {
+        if ((string)($activity['type'] ?? '') !== 'QuoteRequest') return false;
+        $activityActor = is_string($activity['actor'] ?? null)
+            ? trim((string)$activity['actor'])
+            : (is_string($activity['actor']['id'] ?? null) ? trim((string)$activity['actor']['id']) : '');
+        $actorId = trim($actorId) !== '' ? trim($actorId) : $activityActor;
+        if ($actorId === '') return false;
+        if ($activityActor !== '' && !self::sameActorIdentity($actorId, $activityActor)) return false;
+
+        return self::onQuoteRequest($activity, $actorId);
+    }
 
     private static function onCreate(array $a, string $actorId): bool
     {
@@ -1127,8 +1146,8 @@ class InboxProcessor
             ], 'uri=? AND user_id=?', [$uri, $actorId]);
 
             $quoteId = null;
-            $quoteUri  = $obj['quoteUri'] ?? $obj['quoteUrl'] ?? $obj['_misskey_quote'] ?? null;
-            if ($quoteUri && is_string($quoteUri)) {
+            $quoteUri = self::quoteReference($obj);
+            if ($quoteUri) {
                 $quotedStatus = StatusModel::byUri($quoteUri);
                 if (!$quotedStatus) {
                     $quotedStatus = self::fetchRemoteNote($quoteUri, true, 0);
@@ -1287,8 +1306,8 @@ class InboxProcessor
 
         // Resolve quote_of_id from quoteUri (FEP-e232 / fedibird / Misskey extension)
         $quoteOfId = null;
-        $quoteUri  = $obj['quoteUri'] ?? $obj['quoteUrl'] ?? $obj['_misskey_quote'] ?? null;
-        if ($quoteUri && is_string($quoteUri)) {
+        $quoteUri = self::quoteReference($obj);
+        if ($quoteUri) {
             $quotedStatus = StatusModel::byUri($quoteUri);
             if (!$quotedStatus) {
                 // Quoted post not cached locally — try to fetch it from the remote server
@@ -1536,8 +1555,8 @@ class InboxProcessor
             ], 'id=?', [$existing['id']]);
 
             $quoteId = null;
-            $qUri = $data['quoteUri'] ?? $data['quoteUrl'] ?? $data['_misskey_quote'] ?? null;
-            if ($qUri && is_string($qUri) && $qUri !== $noteUri) {
+            $qUri = self::quoteReference($data);
+            if ($qUri && $qUri !== $noteUri) {
                 $qStatus = StatusModel::byUri($qUri)
                     ?? self::fetchRemoteNote($qUri, false, 0);
                 $quoteId = $qStatus['id'] ?? null;
@@ -1691,8 +1710,8 @@ class InboxProcessor
         // Resolve quoteUri of the fetched note so quoted content is visible in clients.
         // $resolveNested=false prevents infinite recursion (we only go 1 level deep).
         if ($resolveNested) {
-            $qUri = $data['quoteUri'] ?? $data['quoteUrl'] ?? $data['_misskey_quote'] ?? null;
-            if ($qUri && is_string($qUri) && $qUri !== $noteUri) {
+            $qUri = self::quoteReference($data);
+            if ($qUri && $qUri !== $noteUri) {
                 $qStatus = StatusModel::byUri($qUri)
                     ?? self::fetchRemoteNote($qUri, false, 0);
                 if ($qStatus) {
@@ -1884,10 +1903,10 @@ class InboxProcessor
                 \App\Models\PollModel::syncRemoteQuestion($existing['id'], $obj);
             }
 
-            if (array_key_exists('quoteUri', $obj) || array_key_exists('quoteUrl', $obj) || array_key_exists('_misskey_quote', $obj)) {
-                $qUri = $obj['quoteUri'] ?? $obj['quoteUrl'] ?? $obj['_misskey_quote'] ?? null;
+            if (array_key_exists('quote', $obj) || array_key_exists('quoteUri', $obj) || array_key_exists('quoteUrl', $obj) || array_key_exists('_misskey_quote', $obj)) {
+                $qUri = self::quoteReference($obj);
                 $quoteId = null;
-                if ($qUri && is_string($qUri)) {
+                if ($qUri) {
                     $quotedStatus = StatusModel::byUri($qUri)
                         ?? self::fetchRemoteNote($qUri, true, 0);
                     $quoteId = $quotedStatus['id'] ?? null;
@@ -2095,6 +2114,111 @@ class InboxProcessor
         }
 
         return false;
+    }
+
+    private static function onQuoteRequest(array $a, string $actorId): bool
+    {
+        $activityUri = trim((string)($a['id'] ?? ''));
+        $quotedUri = self::apObjectId($a['object'] ?? null);
+        $quoteUri = self::apObjectId($a['instrument'] ?? null);
+
+        if ($activityUri === '' || $quotedUri === '' || $quoteUri === '' || $actorId === '') {
+            return false;
+        }
+
+        $quoted = StatusModel::byUri($quotedUri);
+        if (!$quoted || (int)($quoted['local'] ?? 0) !== 1) return false;
+
+        $target = UserModel::byId((string)$quoted['user_id']);
+        if (!$target) return false;
+
+        $remoteActor = RemoteActorModel::fetch($actorId);
+        if (!$remoteActor) return false;
+
+        $accepted = self::quoteRequestCanBeAccepted($a, $actorId, $quoted, $target, $quoteUri);
+        $authorization = QuoteAuthorizationModel::upsertDecision(
+            (string)$target['id'],
+            (string)$quoted['id'],
+            (string)$quoted['uri'],
+            $actorId,
+            $quoteUri,
+            $activityUri,
+            $accepted ? 'accepted' : 'rejected'
+        );
+
+        if ($accepted) {
+            $quoteStatus = self::cacheAcceptedQuoteStatus($quoteUri, $quoted);
+            if ($quoteStatus) {
+                self::insertRemoteNotification((string)$target['id'], $actorId, 'quote', (string)$quoteStatus['id'], now_iso());
+            }
+            $accept = Builder::acceptQuoteRequest($target, $a, $authorization);
+            Delivery::queueToActorInbox($target, $remoteActor, $accept);
+        } else {
+            $reject = Builder::rejectQuoteRequest($target, $actorId, $a);
+            Delivery::queueToActorInbox($target, $remoteActor, $reject);
+        }
+
+        return true;
+    }
+
+    private static function quoteRequestCanBeAccepted(array $request, string $actorId, array $quoted, array $target, string $quoteUri): bool
+    {
+        if (!in_array((string)($quoted['visibility'] ?? ''), ['public', 'unlisted'], true)) return false;
+        if (!StatusModel::canView($quoted, null)) return false;
+        if (!self::quoteRequestInstrumentIsPlausible($request['instrument'] ?? null, $actorId, (string)$quoted['uri'], $quoteUri)) {
+            return false;
+        }
+
+        if (DB::one('SELECT 1 FROM blocks WHERE user_id=? AND target_id=? LIMIT 1', [$target['id'], $actorId])) {
+            return false;
+        }
+
+        $actorDomain = strtolower((string)(parse_url($actorId, PHP_URL_HOST) ?? ''));
+        if ($actorDomain !== '' && in_array($actorDomain, StatusModel::blockedDomains((string)$target['id']), true)) {
+            return false;
+        }
+
+        $targetActor = actor_url((string)$target['username']);
+        if (self::sameActorIdentity($actorId, $targetActor)) return true;
+
+        $policy = StatusModel::normalizeQuotePolicy($quoted['quote_policy'] ?? null, (string)($quoted['visibility'] ?? 'public'));
+        if ($policy === 'public') return true;
+        if ($policy === 'followers') {
+            return (bool)DB::one(
+                'SELECT 1 FROM follows WHERE follower_id=? AND following_id=? AND pending=0 LIMIT 1',
+                [$actorId, $target['id']]
+            );
+        }
+
+        return false;
+    }
+
+    private static function quoteRequestInstrumentIsPlausible(mixed $instrument, string $actorId, string $quotedUri, string $quoteUri): bool
+    {
+        if (!preg_match('#^https?://#i', $quoteUri)) return false;
+        if (!self::urlHostMatches($quoteUri, $actorId)) return false;
+
+        if (!is_array($instrument)) return true;
+
+        $noteTypes = ['Note', 'Article', 'Page', 'Question', 'Video', 'Audio', 'Event'];
+        if (!in_array((string)($instrument['type'] ?? ''), $noteTypes, true)) return false;
+        if (!self::objectAttributedToMatchesActor($instrument, $actorId)) return false;
+
+        $quotedRef = self::quoteReference($instrument);
+        return $quotedRef !== null && self::sameStatusReference($quotedRef, $quotedUri);
+    }
+
+    private static function cacheAcceptedQuoteStatus(string $quoteUri, array $quoted): ?array
+    {
+        $quoteStatus = StatusModel::byUri($quoteUri)
+            ?? self::fetchRemoteNote($quoteUri, true, 0);
+        if (!$quoteStatus) return null;
+
+        DB::run(
+            'UPDATE statuses SET quote_of_id=? WHERE id=?',
+            [(string)$quoted['id'], (string)$quoteStatus['id']]
+        );
+        return StatusModel::byId((string)$quoteStatus['id']) ?? $quoteStatus;
     }
 
     private static function onFeatureRequest(array $a, string $actorId): bool
@@ -2455,8 +2579,8 @@ class InboxProcessor
                     // clients (e.g. Ivory). Without this, boosted quote posts appear without
                     // the embedded quoted content.
                     if ($orig && !$orig['quote_of_id']) {
-                        $qUri = $data['quoteUri'] ?? $data['quoteUrl'] ?? $data['_misskey_quote'] ?? null;
-                        if ($qUri && is_string($qUri)) {
+                        $qUri = self::quoteReference($data);
+                        if ($qUri) {
                             $qStatus = StatusModel::byUri($qUri)
                                 ?? self::fetchRemoteNote($qUri, false, 0);
                             if ($qStatus) {
@@ -2620,6 +2744,33 @@ class InboxProcessor
             return is_string($first) ? $first : $default;
         }
         return $default;
+    }
+
+    private static function apObjectId(mixed $value): string
+    {
+        if (is_string($value)) return trim($value);
+        if (is_array($value) && is_string($value['id'] ?? null)) return trim((string)$value['id']);
+        return '';
+    }
+
+    private static function quoteReference(array $obj): ?string
+    {
+        foreach (['quote', 'quoteUri', 'quoteUrl', '_misskey_quote'] as $field) {
+            $value = self::apObjectId($obj[$field] ?? null);
+            if ($value !== '') return $value;
+        }
+        return null;
+    }
+
+    private static function sameStatusReference(string $a, string $b): bool
+    {
+        $left = StatusModel::byUri($a);
+        $right = StatusModel::byUri($b);
+        if ($left && $right) {
+            return (string)$left['id'] === (string)$right['id'];
+        }
+
+        return rtrim($a, '/') === rtrim($b, '/');
     }
 
     /**

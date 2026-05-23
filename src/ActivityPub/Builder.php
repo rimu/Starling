@@ -26,6 +26,8 @@ class Builder
             'FeatureRequest' => 'toot:FeatureRequest',
             'FeatureAuthorization' => 'toot:FeatureAuthorization',
             'FeaturedItem' => 'toot:FeaturedItem',
+            'QuoteRequest' => 'https://w3id.org/fep/044f#QuoteRequest',
+            'QuoteAuthorization' => 'https://w3id.org/fep/044f#QuoteAuthorization',
             'featuredObject' => ['@id' => 'toot:featuredObject', '@type' => '@id'],
             'featuredObjectType' => 'toot:featuredObjectType',
             'featureAuthorization' => ['@id' => 'toot:featureAuthorization', '@type' => '@id'],
@@ -35,7 +37,11 @@ class Builder
             'PropertyValue' => 'schema:PropertyValue',
             'value'       => 'schema:value',
             'fedibird'    => 'http://fedibird.com/ns#',
+            'quote'       => ['@id' => 'https://w3id.org/fep/044f#quote', '@type' => '@id'],
+            'quoteAuthorization' => ['@id' => 'https://w3id.org/fep/044f#quoteAuthorization', '@type' => '@id'],
+            'quoteUrl'    => ['@id' => 'as:quoteUrl', '@type' => '@id'],
             'quoteUri'    => ['@id' => 'fedibird:quoteUri', '@type' => '@id'],
+            '_misskey_quote' => ['@id' => 'https://misskey-hub.net/ns#_misskey_quote', '@type' => '@id'],
             'gts'         => 'https://gotosocial.org/ns#',
             'interactionPolicy' => ['@id' => 'gts:interactionPolicy', '@type' => '@id'],
             'canFeature'  => 'gts:canFeature',
@@ -212,7 +218,10 @@ class Builder
             $result['inReplyTo'] = self::replyToUri($s['reply_to_id']);
         }
         if ($quoteUri) {
+            $result['quote'] = $quoteUri;
             $result['quoteUri'] = $quoteUri;
+            $result['quoteUrl'] = $quoteUri;
+            $result['_misskey_quote'] = $quoteUri;
         }
         if ($poll) {
             $result = array_merge($result, \App\Models\PollModel::toActivityPub($poll));
@@ -425,6 +434,48 @@ class Builder
             'type' => 'FeatureAuthorization',
             'interactionTarget' => actor_url((string)$actor['username']),
             'interactingObject' => (string)$authorization['remote_collection_uri'],
+        ];
+    }
+
+    public static function acceptQuoteRequest(array $actor, array $quoteRequest, array $authorization): array
+    {
+        $actorUrl = actor_url((string)$actor['username']);
+        $activityUri = is_string($quoteRequest['id'] ?? null) ? (string)$quoteRequest['id'] : json_encode($quoteRequest);
+        $authUrl = \App\Models\QuoteAuthorizationModel::authorizationUrl($actor, $authorization);
+        return [
+            '@context' => self::CTX,
+            'type' => 'Accept',
+            'id' => $actorUrl . '#accepts/quote_requests/' . md5((string)$activityUri),
+            'actor' => $actorUrl,
+            'to' => [(string)$authorization['remote_actor_id']],
+            'object' => $quoteRequest,
+            'result' => $authUrl,
+        ];
+    }
+
+    public static function rejectQuoteRequest(array $actor, string $remoteActorId, array $quoteRequest): array
+    {
+        $actorUrl = actor_url((string)$actor['username']);
+        $activityUri = is_string($quoteRequest['id'] ?? null) ? (string)$quoteRequest['id'] : json_encode($quoteRequest);
+        return [
+            '@context' => self::CTX,
+            'type' => 'Reject',
+            'id' => $actorUrl . '#rejects/quote_requests/' . md5((string)$activityUri),
+            'actor' => $actorUrl,
+            'to' => [$remoteActorId],
+            'object' => $quoteRequest,
+        ];
+    }
+
+    public static function quoteAuthorization(array $actor, array $authorization): array
+    {
+        return [
+            '@context' => self::CTX,
+            'id' => \App\Models\QuoteAuthorizationModel::authorizationUrl($actor, $authorization),
+            'type' => 'QuoteAuthorization',
+            'attributedTo' => actor_url((string)$actor['username']),
+            'interactingObject' => (string)$authorization['quote_uri'],
+            'interactionTarget' => (string)$authorization['quoted_uri'],
         ];
     }
 

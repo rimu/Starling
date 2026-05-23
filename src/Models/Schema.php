@@ -8,7 +8,7 @@ class Schema
     private static bool $done = false;
 
     /** Increment this when adding new tables or columns. */
-    public const SCHEMA_VERSION = 26;
+    public const SCHEMA_VERSION = 27;
 
     public static function install(): void
     {
@@ -512,6 +512,7 @@ class Schema
         )");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_cfa_user_state ON collection_feature_authorizations(user_id, state, updated_at DESC)");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_cfa_remote_actor ON collection_feature_authorizations(remote_actor_id, updated_at DESC)");
+        self::ensureQuoteAuthorizationTables($db);
 
         // Follow suggestions seed
         $db->exec("CREATE TABLE IF NOT EXISTS follow_suggestions (
@@ -664,6 +665,7 @@ class Schema
     {
         self::ensureStatusColumns($db);
         self::ensureDeliveryLogTables($db);
+        self::ensureQuoteAuthorizationTables($db);
         self::ensureLoginAttemptTables($db);
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_of_id TEXT"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_policy TEXT NOT NULL DEFAULT 'public'"); } catch (\Throwable) {}
@@ -873,8 +875,30 @@ class Schema
         if (!self::hasColumn($db, 'statuses', 'quote_policy')) return false;
         if (!self::hasColumn($db, 'statuses', 'title')) return false;
         if (!self::hasColumn($db, 'statuses', 'expires_at')) return false;
+        if (!self::hasTable($db, 'quote_authorizations')) return false;
         if (!self::hasColumn($db, 'inbox_log', 'disposition')) return false;
         return true;
+    }
+
+    private static function ensureQuoteAuthorizationTables(\PDO $db): void
+    {
+        $db->exec("CREATE TABLE IF NOT EXISTS quote_authorizations (
+            id               TEXT PRIMARY KEY,
+            user_id          TEXT NOT NULL,
+            quoted_status_id TEXT NOT NULL,
+            quoted_uri       TEXT NOT NULL,
+            remote_actor_id  TEXT NOT NULL,
+            quote_uri        TEXT NOT NULL,
+            activity_uri     TEXT NOT NULL,
+            state            TEXT NOT NULL DEFAULT 'accepted',
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            UNIQUE(user_id, activity_uri),
+            UNIQUE(quoted_status_id, quote_uri)
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_user_state ON quote_authorizations(user_id, state, updated_at DESC)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_remote_actor ON quote_authorizations(remote_actor_id, updated_at DESC)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_quote_uri ON quote_authorizations(quote_uri)");
     }
 
     private static function hasColumn(\PDO $db, string $table, string $column): bool
@@ -888,6 +912,15 @@ class Schema
             if (($row['name'] ?? null) === $column) return true;
         }
         return false;
+    }
+
+    private static function hasTable(\PDO $db, string $table): bool
+    {
+        try {
+            return (bool)$db->query("SELECT name FROM sqlite_master WHERE type='table' AND name=" . $db->quote($table))->fetchColumn();
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     private static function markCriticalBackfills(): void
