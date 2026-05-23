@@ -1,4 +1,4 @@
-# ⋰⋱ Starling (v0.0.5)
+# ⋰⋱ Starling (v0.0.6)
 
 > The simplest way to run your own fediverse server: no database, no workers, no DevOps.
 
