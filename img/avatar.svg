@@ -1,11 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="Default avatar">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="Default Starling avatar">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0f766e"/>
-      <stop offset="100%" stop-color="#155e75"/>
+    <linearGradient id="avatar-bg" x1="32" y1="20" x2="128" y2="145" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#19b8ff"/>
+      <stop offset=".5" stop-color="#0085ff"/>
+      <stop offset="1" stop-color="#0756c9"/>
     </linearGradient>
+    <radialGradient id="avatar-shade" cx="50%" cy="112%" r="78%">
+      <stop offset="0" stop-color="#061b3f" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#061b3f" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="avatar-glow" cx="33%" cy="18%" r="62%">
+      <stop offset="0" stop-color="#fff" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <rect width="160" height="160" rx="24" fill="url(#g)"/>
-  <circle cx="80" cy="60" r="28" fill="#d1fae5"/>
-  <path d="M32 132c7-24 27-38 48-38s41 14 48 38" fill="#d1fae5"/>
+  <circle cx="80" cy="80" r="80" fill="url(#avatar-bg)"/>
+  <circle cx="80" cy="80" r="80" fill="url(#avatar-shade)"/>
+  <circle cx="80" cy="80" r="80" fill="url(#avatar-glow)"/>
+  <path d="M31 100c18-15 37-22 57-20 15 1 29 6 41 15" fill="none" stroke="#dff6ff" stroke-width="12" stroke-linecap="round" opacity=".12"/>
+  <path d="M42 38c16-8 31-11 46-9 12 1 24 5 34 12" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity=".12"/>
+  <circle cx="80" cy="59" r="28" fill="#fff"/>
+  <path d="M31 128c7-31 27-50 49-50s42 19 49 50c-13 11-30 17-49 17s-36-6-49-17Z" fill="#fff"/>
+  <path d="M42 125c8-22 23-34 38-34s30 12 38 34" fill="#bfeaff" opacity=".24"/>
 </svg>
