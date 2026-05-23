@@ -28,10 +28,13 @@ class AppsCtrl
      */
     public function verifyCredentials(array $p): void
     {
-        $ctx = auth_context();
-        if (!$ctx) err_out('Unauthorized', 401);
-        $row = $ctx['token'] ?? null;
+        $tok = bearer();
+        if (!$tok) err_out('Unauthorized', 401);
+
+        $row = OAuthModel::tokenByValue($tok);
         if (!$row) err_out('Unauthorized', 401);
+
+        OAuthModel::touchTokenUsage($row);
 
         $app = DB::one('SELECT * FROM oauth_apps WHERE id=?', [$row['app_id']]);
         if (!$app) err_out('Not found', 404);

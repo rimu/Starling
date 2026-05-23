@@ -76,8 +76,9 @@ use App\ActivityPub\{Builder, Delivery};
                 'reply_to_uid'    => $replyToUid,
                 'reblog_of_id'    => null,
                 'quote_of_id'     => $quoteOfId,
+                'title'           => self::apExtractTitle($obj),
                 'content'         => self::apExtractContent($obj),
-                'cw'              => self::apStr($obj['summary'] ?? ''),
+                'cw'              => self::apExtractContentWarning($obj),
                 'visibility'      => self::apVisibility($obj['to'] ?? [], $obj['cc'] ?? []),
                 'language'        => is_array($obj['contentMap'] ?? null)
                     ? (array_key_first((array)$obj['contentMap']) ?? 'en')
@@ -200,6 +201,43 @@ use App\ActivityPub\{Builder, Delivery};
         return self::apStr($obj['name'] ?? '');
     }
 
+    private static function apExtractTitle(array $obj): string
+    {
+        $type = (string)($obj['type'] ?? '');
+        if (!in_array($type, ['Article', 'Page', 'Video', 'Audio', 'Event'], true)) {
+            return '';
+        }
+
+        $title = trim(strip_tags(html_entity_decode(self::apStr($obj['name'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        if ($title === '') return '';
+
+        $content = trim(strip_tags(html_entity_decode(self::apStr($obj['content'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        if ($content === '' && is_array($obj['contentMap'] ?? null)) {
+            foreach ($obj['contentMap'] as $text) {
+                if (!is_string($text) || trim($text) === '') continue;
+                $content = trim(strip_tags(html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                break;
+            }
+        }
+        if ($content === '') return '';
+        if (mb_strtolower($content, 'UTF-8') === mb_strtolower($title, 'UTF-8')) return '';
+
+        return mb_substr($title, 0, 500, 'UTF-8');
+    }
+
+    private static function apExtractContentWarning(array $obj, string $default = ''): string
+    {
+        $summary = self::apStr($obj['summary'] ?? '', $default);
+        if ($summary === '') return '';
+
+        $type = (string)($obj['type'] ?? '');
+        if (in_array($type, ['Article', 'Page', 'Video', 'Audio', 'Event'], true) && empty($obj['sensitive'])) {
+            return '';
+        }
+
+        return $summary;
+    }
+
     private static function apList(mixed $value): array
     {
         if ($value === null || $value === '') return [];
@@ -298,7 +336,7 @@ use App\ActivityPub\{Builder, Delivery};
         $user  = UserModel::create(['username' => $un, 'email' => $em, 'password' => $pw]);
         $token = OAuthModel::createToken($app['id'], $user['id'], $app['scopes']);
 
-        json_out(['access_token' => $token, 'token_type' => 'Bearer', 'scope' => $app['scopes'], 'created_at' => time(), 'expires_in' => 315360000]);
+        json_out(['access_token' => $token, 'token_type' => 'Bearer', 'scope' => $app['scopes'], 'created_at' => time(), 'expires_in' => OAuthModel::tokenExpiresIn()]);
     }
 
     // ── Credentials ──────────────────────────────────────────
@@ -348,6 +386,7 @@ use App\ActivityPub\{Builder, Delivery};
             if (isset($src['privacy']))       $existingPrefs['posting:default:visibility'] = $src['privacy'];
             if (isset($src['sensitive']))     $existingPrefs['posting:default:sensitive']  = bool_val($src['sensitive']);
             if (isset($src['language']))      $existingPrefs['posting:default:language']   = $src['language'];
+            if (isset($src['quote_policy']))  $existingPrefs['posting:default:quote_policy'] = \App\Models\StatusModel::normalizeQuotePolicy((string)$src['quote_policy']);
             if (array_key_exists('expire_after', $src)) {
                 $expireAfter = (int)($src['expire_after'] ?? 0);
                 $existingPrefs['posting:default:expire_after'] = $expireAfter > 0 ? $expireAfter : null;

@@ -120,14 +120,19 @@ function is_https_request(): bool
     if (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') return true;
     if (strtolower((string)($_SERVER['REQUEST_SCHEME'] ?? '')) === 'https') return true;
     if ((string)($_SERVER['SERVER_PORT'] ?? '') === '443') return true;
-    if (strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https') return true;
-    if (strtolower((string)($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '')) === 'on') return true;
+    if (forwarded_header_trusted_source()) {
+        if (strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https') return true;
+        if (strtolower((string)($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '')) === 'on') return true;
+    }
     return false;
 }
 
 function request_base_url(): string
 {
-    $host = trim((string)($_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? ''));
+    $hostHeader = forwarded_header_trusted_source()
+        ? ($_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? '')
+        : ($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? '');
+    $host = trim((string)$hostHeader);
     if ($host === '') return AP_BASE_URL;
 
     if (str_contains($host, ',')) {
@@ -273,11 +278,90 @@ function throttle_allow(string $key, int $intervalSeconds): bool
 function client_ip(): string
 {
     $fwd = trim((string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? ''));
-    if ($fwd !== '') {
-        $first = trim(explode(',', $fwd)[0]);
-        if ($first !== '') return $first;
+    if ($fwd !== '' && forwarded_header_trusted_source()) {
+        foreach (explode(',', $fwd) as $candidate) {
+            $candidate = trim($candidate);
+            if (filter_var($candidate, FILTER_VALIDATE_IP)) {
+                return $candidate;
+            }
+        }
     }
-    return trim((string)($_SERVER['REMOTE_ADDR'] ?? 'unknown')) ?: 'unknown';
+    $remote = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    return filter_var($remote, FILTER_VALIDATE_IP) ? $remote : 'unknown';
+}
+
+function forwarded_header_trusted_source(): bool
+{
+    $remote = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    if (!filter_var($remote, FILTER_VALIDATE_IP)) {
+        return false;
+    }
+
+    if (trusted_proxy_match($remote)) {
+        return true;
+    }
+
+    // Local reverse proxies commonly appear as loopback/private addresses.
+    return !filter_var($remote, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+}
+
+function trusted_proxy_match(string $ip): bool
+{
+    foreach (trusted_proxy_ranges() as $range) {
+        if (ip_matches_range($ip, $range)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function trusted_proxy_ranges(): array
+{
+    static $ranges = null;
+    if ($ranges !== null) {
+        return $ranges;
+    }
+
+    $cfg = function_exists('generated_config') ? generated_config() : [];
+    $raw = $cfg['trusted_proxies'] ?? getenv('STARLING_TRUSTED_PROXIES') ?: [];
+    if (is_string($raw)) {
+        $raw = preg_split('/[\s,]+/', $raw) ?: [];
+    }
+    if (!is_array($raw)) {
+        $raw = [];
+    }
+
+    $ranges = array_values(array_filter(array_map(static fn($v) => trim((string)$v), $raw), static fn($v) => $v !== ''));
+    return $ranges;
+}
+
+function ip_matches_range(string $ip, string $range): bool
+{
+    if (str_contains($range, '/')) {
+        [$subnet, $bitsRaw] = array_pad(explode('/', $range, 2), 2, '');
+        $ipBin = @inet_pton($ip);
+        $netBin = @inet_pton(trim($subnet));
+        if ($ipBin === false || $netBin === false || strlen($ipBin) !== strlen($netBin) || !ctype_digit($bitsRaw)) {
+            return false;
+        }
+        $bits = (int)$bitsRaw;
+        $maxBits = strlen($ipBin) * 8;
+        if ($bits < 0 || $bits > $maxBits) {
+            return false;
+        }
+        $bytes = intdiv($bits, 8);
+        $rem = $bits % 8;
+        if ($bytes > 0 && substr($ipBin, 0, $bytes) !== substr($netBin, 0, $bytes)) {
+            return false;
+        }
+        if ($rem === 0) {
+            return true;
+        }
+        $mask = (0xFF << (8 - $rem)) & 0xFF;
+        return (ord($ipBin[$bytes]) & $mask) === (ord($netBin[$bytes]) & $mask);
+    }
+
+    return filter_var($range, FILTER_VALIDATE_IP) && inet_pton($ip) === inet_pton($range);
 }
 
 function rate_limit_bucket_path(string $scope): string
@@ -356,6 +440,21 @@ function rate_limit_enforce(string $scope, int $limit, int $windowSeconds, strin
 
 // ── Request helpers ──────────────────────────────────────────
 
+function max_request_body_bytes(): int
+{
+    $uploadBytes = max(1, (int)(defined('AP_MAX_UPLOAD_MB') ? AP_MAX_UPLOAD_MB : 30)) * 1024 * 1024;
+    return max(2 * 1024 * 1024, $uploadBytes + 1024 * 1024);
+}
+
+function enforce_request_body_limit(?int $maxBytes = null): void
+{
+    $maxBytes ??= max_request_body_bytes();
+    $len = trim((string)($_SERVER['CONTENT_LENGTH'] ?? ''));
+    if ($len !== '' && ctype_digit($len) && (float)$len > $maxBytes) {
+        err_out('Payload too large', 413);
+    }
+}
+
 function raw_input_body(): string
 {
     static $raw = null;
@@ -378,8 +477,9 @@ function req_body(): array
     $ct     = $_SERVER['CONTENT_TYPE'] ?? '';
     $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
-    // multipart/form-data em PATCH: PHP não preenche $_POST nem $_FILES automaticamente
-    if ($method === 'PATCH' && str_contains($ct, 'multipart/form-data')) {
+    // multipart/form-data em PUT/PATCH: PHP não preenche $_POST nem $_FILES automaticamente
+    if (in_array($method, ['PATCH', 'PUT'], true) && str_contains($ct, 'multipart/form-data')) {
+        enforce_request_body_limit();
         $parsed = [];
         // Extrair boundary
         $flatParts = [];
@@ -431,12 +531,16 @@ function req_body(): array
     // application/x-www-form-urlencoded em PATCH/DELETE/PUT
     // PHP não popula $_POST para DELETE/PUT, por isso é necessário parsear manualmente
     if (in_array($method, ['PATCH', 'DELETE', 'PUT']) && str_contains($ct, 'application/x-www-form-urlencoded')) {
+        enforce_request_body_limit();
         $raw = raw_input_body();
         parse_str($raw, $parsed);
         return $parsed;
     }
 
     // JSON ou POST normal
+    if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+        enforce_request_body_limit();
+    }
     $raw    = raw_input_body();
     $parsed = $raw !== '' ? (json_decode($raw, true) ?? []) : [];
     // Para DELETE/PUT com JSON: $_POST está vazio, usar apenas o JSON

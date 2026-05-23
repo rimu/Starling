@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers\Api;
 
 use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, PollModel};
-use App\ActivityPub\{Builder, Delivery};
+use App\ActivityPub\{Builder, Delivery, InboxProcessor};
 
 class StatusesCtrl
 {
@@ -73,10 +73,37 @@ class StatusesCtrl
         return $s;
     }
 
+    private function refreshRemoteArticleMetadataIfNeeded(array $s, ?string $viewerId): array
+    {
+        if ((int)($s['local'] ?? 0) !== 0) return $s;
+        if (trim((string)($s['title'] ?? '')) !== '') return $s;
+
+        $uri = (string)($s['uri'] ?? '');
+        if (!str_starts_with($uri, 'https://')) return $s;
+
+        $query = (string)(parse_url($uri, PHP_URL_QUERY) ?? '');
+        $path = (string)(parse_url($uri, PHP_URL_PATH) ?? '');
+        $looksLikeArticle = (bool)preg_match('~(?:^|&)p=\d+(?:&|$)~', $query)
+            || (bool)preg_match('~/\d{4}/\d{2}/\d{2}/[^/]+/?$~', $path);
+        if (!$looksLikeArticle) return $s;
+
+        try {
+            $fresh = InboxProcessor::fetchRemoteNote($uri, true, 0, true);
+            if ($fresh && StatusModel::canView($fresh, $viewerId)) {
+                return $fresh;
+            }
+        } catch (\Throwable $e) {
+            error_log('[Starling] remote article metadata refresh skipped: ' . $e->getMessage());
+        }
+
+        return $s;
+    }
+
     public function show(array $p): void
     {
         $viewer = authed_user();
         $s = $this->requireVisibleStatus($p['id'], $viewer['id'] ?? null);
+        $s = $this->refreshRemoteArticleMetadataIfNeeded($s, $viewer['id'] ?? null);
         $out = StatusModel::toMasto($s, $viewer['id'] ?? null);
         if (!$out) err_out('Not found', 404);
         json_out($out);
@@ -271,6 +298,9 @@ class StatusesCtrl
         $user = require_auth(['write', 'write:statuses']);
         rate_limit_enforce('statuses_create:' . $user['id'], 20, 300, 'Rate limit exceeded for posting');
         $d    = req_body();
+        if (!isset($d['quote_id']) && !empty($d['quoted_status_id'])) {
+            $d['quote_id'] = $d['quoted_status_id'];
+        }
         $rawStatus = $d['status'] ?? '';
         if ($rawStatus !== '' && !is_string($rawStatus)) {
             err_out('status must be a string', 422);
@@ -283,6 +313,10 @@ class StatusesCtrl
         $d['visibility'] = in_array($requestedVisibility, ['public', 'unlisted', 'private', 'direct'], true)
             ? $requestedVisibility
             : 'public';
+        if (!isset($d['quote_approval_policy']) || $d['quote_approval_policy'] === '') {
+            $prefs = json_decode($user['preferences'] ?? '{}', true) ?: [];
+            $d['quote_approval_policy'] = $prefs['posting:default:quote_policy'] ?? 'public';
+        }
 
         // Idempotency-Key: Mastodon iOS sends this header to deduplicate retries.
         // If we've already processed a request with this key for this user, return
@@ -337,6 +371,10 @@ class StatusesCtrl
             if (!$quoted || !StatusModel::canView($quoted, $user['id'])) {
                 err_out('Cannot quote this post', 422);
             }
+            $approval = StatusModel::toMasto($quoted, $user['id'])['quote_approval']['current_user'] ?? 'denied';
+            if ($approval !== 'automatic' && $approval !== 'manual') {
+                err_out('You are not allowed to quote this post', 422);
+            }
         }
 
         $status = null;
@@ -374,10 +412,26 @@ class StatusesCtrl
                             $seenLocalMentions[$target['id']] = true;
                             DB::insertIgnore('notifications', [
                                 'id' => flake_id(), 'user_id' => $target['id'], 'from_acct_id' => $user['id'],
-                                'type' => 'mention', 'status_id' => $status['id'],
+                                'type' => $isDirect ? 'direct' : 'mention', 'status_id' => $status['id'],
                                 'read_at' => null, 'created_at' => now_iso(),
                             ]);
                         }
+                    }
+                }
+
+                if (!empty($d['quote_id'])) {
+                    $quoted = StatusModel::byId((string)$d['quote_id']);
+                    $quotedOwnerId = (string)($quoted['user_id'] ?? '');
+                    if ($quoted && $quotedOwnerId !== '' && $quotedOwnerId !== $user['id'] && UserModel::byId($quotedOwnerId)) {
+                        DB::insertIgnore('notifications', [
+                            'id'           => flake_id(),
+                            'user_id'      => $quotedOwnerId,
+                            'from_acct_id' => $user['id'],
+                            'type'         => 'quote',
+                            'status_id'    => $status['id'],
+                            'read_at'      => null,
+                            'created_at'   => now_iso(),
+                        ]);
                     }
                 }
 
@@ -814,7 +868,7 @@ class StatusesCtrl
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_USERAGENT      => AP_SOFTWARE . '/' . AP_VERSION . ' (+https://' . AP_DOMAIN . ')',
             CURLOPT_HTTPHEADER     => ['Accept: text/html'],
-        ]);
+        ] + RemoteActorModel::safeCurlResolveOptions($normalizedUrl));
         $html = curl_exec($ch);
         $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
         if (PHP_VERSION_ID < 80000) {

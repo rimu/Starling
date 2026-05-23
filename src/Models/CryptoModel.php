@@ -1096,7 +1096,9 @@ class CryptoModel
             'url' => ['@id' => 'as:url', '@type' => '@id'],
             'altitude' => ['@id' => 'as:altitude', '@type' => 'xsd:float'],
             'content' => 'as:content',
+            'contentMap' => ['@id' => 'as:content', '@container' => '@language'],
             'name' => 'as:name',
+            'nameMap' => ['@id' => 'as:name', '@container' => '@language'],
             'duration' => ['@id' => 'as:duration', '@type' => 'xsd:duration'],
             'endTime' => ['@id' => 'as:endTime', '@type' => 'xsd:dateTime'],
             'height' => ['@id' => 'as:height', '@type' => 'xsd:nonNegativeInteger'],
@@ -1111,6 +1113,7 @@ class CryptoModel
             'startIndex' => ['@id' => 'as:startIndex', '@type' => 'xsd:nonNegativeInteger'],
             'startTime' => ['@id' => 'as:startTime', '@type' => 'xsd:dateTime'],
             'summary' => 'as:summary',
+            'summaryMap' => ['@id' => 'as:summary', '@container' => '@language'],
             'totalItems' => ['@id' => 'as:totalItems', '@type' => 'xsd:nonNegativeInteger'],
             'units' => 'as:units',
             'updated' => ['@id' => 'as:updated', '@type' => 'xsd:dateTime'],
@@ -1286,8 +1289,30 @@ class CryptoModel
             // Determine term type coercion
             $termDef = $ctx[$key] ?? null;
             $typeCoerce = null;
+            $container = null;
             if (is_array($termDef) && isset($termDef['@type'])) {
                 $typeCoerce = $termDef['@type'];
+            }
+            if (is_array($termDef) && isset($termDef['@container'])) {
+                $container = $termDef['@container'];
+            }
+
+            if ($container === '@language' && is_array($value) && !array_is_list($value)) {
+                $expanded = [];
+                foreach ($value as $lang => $texts) {
+                    $items = is_array($texts) && array_is_list($texts) ? $texts : [$texts];
+                    foreach ($items as $text) {
+                        if (!is_scalar($text)) continue;
+                        $expanded[] = [
+                            '@value' => (string)$text,
+                            '@language' => strtolower((string)$lang),
+                        ];
+                    }
+                }
+                if ($expanded !== []) {
+                    $result[$iri] = $expanded;
+                }
+                continue;
             }
 
             // Expand value(s)

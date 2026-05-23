@@ -5,6 +5,47 @@ namespace App\Models;
 
 class StatusModel
 {
+    public static function normalizeQuotePolicy(?string $policy, string $visibility = 'public'): string
+    {
+        if (in_array($visibility, ['private', 'direct'], true)) {
+            return 'nobody';
+        }
+
+        $policy = strtolower(trim((string)$policy));
+        return in_array($policy, ['public', 'followers', 'nobody'], true) ? $policy : 'public';
+    }
+
+    private static function quoteApprovalForStatus(array $s, ?string $viewerId): array
+    {
+        $policy = self::normalizeQuotePolicy($s['quote_policy'] ?? null, (string)($s['visibility'] ?? 'public'));
+        $automatic = $policy === 'public' ? ['public'] : ($policy === 'followers' ? ['followers'] : []);
+        $currentUser = 'denied';
+
+        if ($viewerId !== null && $viewerId === ($s['user_id'] ?? null)) {
+            $currentUser = ($s['visibility'] ?? 'public') === 'direct' ? 'denied' : 'automatic';
+        } elseif ($policy === 'public' && ($s['visibility'] ?? 'public') !== 'direct') {
+            $currentUser = 'automatic';
+        } elseif ($policy === 'followers' && $viewerId) {
+            $isFollower = (bool)DB::one(
+                'SELECT 1 FROM follows WHERE follower_id=? AND following_id=? AND pending=0',
+                [$viewerId, $s['user_id']]
+            );
+            if ($isFollower) {
+                $currentUser = 'automatic';
+            }
+        }
+
+        if ($viewerId && (bool)DB::one('SELECT 1 FROM blocks WHERE user_id=? AND target_id=?', [$s['user_id'], $viewerId])) {
+            $currentUser = 'denied';
+        }
+
+        return [
+            'automatic' => $automatic,
+            'manual' => [],
+            'current_user' => $currentUser,
+        ];
+    }
+
     private static function expiresAtFromInput(array $d): ?string
     {
         if (!empty($d['expires_at'])) {
@@ -103,6 +144,7 @@ class StatusModel
             'reply_to_uid'=> null,
             'reblog_of_id'=> null,
             'quote_of_id' => $d['quote_id'] ?? null,
+            'quote_policy'=> self::normalizeQuotePolicy($d['quote_approval_policy'] ?? null, $visibility),
             'content'     => $d['status'] ?? '',
             'cw'          => $d['spoiler_text'] ?? '',
             'visibility'  => $visibility,
@@ -661,6 +703,7 @@ class StatusModel
             'quotes_count'           => $quotesCount,
             'edited_at'              => $editedAt ? best_iso_timestamp($editedAt, $s['created_at'] ?? null, null) : null,
             'expires_at'             => iso_z($s['expires_at'] ?? null),
+            'title'                  => trim((string)($s['title'] ?? '')),
             'content'                => $content,
             'text'                   => ($isLocal && $viewerId === $s['user_id']) ? ($s['content'] ?? null) : null,
             'reblog'                 => $reblog,
@@ -675,9 +718,10 @@ class StatusModel
             'quote_id'               => $quote ? $quote['id'] : null,
             'quote'                  => $quote ? [
                 'state'            => 'accepted',
-                'quoted_status_id' => null,
+                'quoted_status_id' => $quote['id'],
                 'quoted_status'    => $quote,
             ] : null,
+            'quote_approval'         => self::quoteApprovalForStatus($s, $viewerId),
             'favourited'             => (bool)$favd,
             'reblogged'              => (bool)$rbd,
             'muted'                  => false,

@@ -124,6 +124,8 @@ $migrateLegacyConfig = static function (int $userCount) use ($writeGeneratedConf
         'db_path'       => AP_DB_PATH,
         'media_dir'     => AP_MEDIA_DIR,
         'max_upload_mb' => AP_MAX_UPLOAD_MB,
+        'trusted_proxies' => [],
+        'oauth_token_ttl_days' => 0,
         'open_reg'      => AP_OPEN_REG,
         'post_chars'    => AP_POST_CHARS,
         'home_timeline_max_items' => defined('AP_HOME_TIMELINE_MAX_ITEMS') ? AP_HOME_TIMELINE_MAX_ITEMS : 800,
@@ -156,7 +158,7 @@ if ($apAllowInstall && $userCount === 0) {
 // ── Security headers ─────────────────────────────────────────
 if (!headers_sent()) {
     header('X-Content-Type-Options: nosniff');
-    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; font-src 'self' data:; frame-ancestors 'self';");
+    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
     if (!AP_DEBUG && is_https_request()) {
         header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
     }

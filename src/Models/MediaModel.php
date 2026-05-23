@@ -6,6 +6,7 @@ namespace App\Models;
 class MediaModel
 {
     private const BLURHASH_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~';
+    private const IMAGE_MATRIX_LIMIT = 16777216;
 
     public static function upload(array $file, string $userId): ?array
     {
@@ -68,7 +69,11 @@ class MediaModel
         $blurhash   = '';
 
         if ($type === 'image') {
-            [$w, $h, $previewUrl, $blurhash] = self::prepareImageVariants($dest, $mime, $name);
+            [$w, $h, $previewUrl, $blurhash, $validImage] = self::prepareImageVariants($dest, $mime, $name);
+            if (!$validImage) {
+                @unlink($dest);
+                return null;
+            }
         }
 
         DB::insert('media_attachments', [
@@ -128,19 +133,26 @@ class MediaModel
 
     private static function prepareImageVariants(string $dest, string $mime, string $name): array
     {
-        $sz = @getimagesize($dest);
+        $sz = self::safeGetImageSize($dest);
         $w  = $sz[0] ?? null;
         $h  = $sz[1] ?? null;
         $previewUrl = AP_MEDIA_URL . '/' . $name;
         $blurhash   = '';
 
+        if (!$sz) {
+            return [null, null, $previewUrl, $blurhash, false];
+        }
+        if ((int)$w <= 0 || (int)$h <= 0 || ((int)$w * (int)$h) > self::IMAGE_MATRIX_LIMIT) {
+            return [null, null, $previewUrl, $blurhash, false];
+        }
+
         if (!extension_loaded('gd')) {
-            return [$w, $h, $previewUrl, $blurhash];
+            return [$w, $h, $previewUrl, $blurhash, true];
         }
 
         $img = self::loadGdImage($dest, $mime);
         if (!$img) {
-            return [$w, $h, $previewUrl, $blurhash];
+            return [$w, $h, $previewUrl, $blurhash, !self::canDecodeWithGd($mime)];
         }
 
         $img = self::autoOrientImage($img, $dest, $mime);
@@ -160,7 +172,17 @@ class MediaModel
         $previewUrl = AP_MEDIA_URL . '/' . $previewName;
         $blurhash   = self::encodeAverageBlurhash($img);
 
-        return [$w, $h, $previewUrl, $blurhash];
+        return [$w, $h, $previewUrl, $blurhash, true];
+    }
+
+    private static function safeGetImageSize(string $path): array|false
+    {
+        set_error_handler(static fn() => true);
+        try {
+            return getimagesize($path);
+        } finally {
+            restore_error_handler();
+        }
     }
 
     private static function autoOrientImage($img, string $path, string $mime)
@@ -216,12 +238,31 @@ class MediaModel
 
     private static function loadGdImage(string $path, string $mime)
     {
-        return match ($mime) {
-            'image/jpeg' => function_exists('imagecreatefromjpeg') ? @imagecreatefromjpeg($path) : null,
-            'image/png'  => function_exists('imagecreatefrompng') ? @imagecreatefrompng($path) : null,
-            'image/gif'  => function_exists('imagecreatefromgif') ? @imagecreatefromgif($path) : null,
-            'image/webp' => function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($path) : null,
+        $loader = match ($mime) {
+            'image/jpeg' => function_exists('imagecreatefromjpeg') ? 'imagecreatefromjpeg' : null,
+            'image/png'  => function_exists('imagecreatefrompng') ? 'imagecreatefrompng' : null,
+            'image/gif'  => function_exists('imagecreatefromgif') ? 'imagecreatefromgif' : null,
+            'image/webp' => function_exists('imagecreatefromwebp') ? 'imagecreatefromwebp' : null,
             default      => null,
+        };
+        if ($loader === null) return null;
+
+        set_error_handler(static fn() => true);
+        try {
+            return $loader($path);
+        } finally {
+            restore_error_handler();
+        }
+    }
+
+    private static function canDecodeWithGd(string $mime): bool
+    {
+        return match ($mime) {
+            'image/jpeg' => function_exists('imagecreatefromjpeg'),
+            'image/png'  => function_exists('imagecreatefrompng'),
+            'image/gif'  => function_exists('imagecreatefromgif'),
+            'image/webp' => function_exists('imagecreatefromwebp'),
+            default      => false,
         };
     }
 

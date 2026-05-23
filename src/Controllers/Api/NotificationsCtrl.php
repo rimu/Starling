@@ -9,7 +9,7 @@ class NotificationsCtrl
 {
     private const ALLOWED_NOTIF_TYPES = [
         'mention', 'reblog', 'favourite', 'follow', 'follow_request',
-        'poll', 'update', 'status', 'direct', 'admin.sign_up',
+        'poll', 'update', 'status', 'direct', 'quote', 'quoted_update', 'admin.sign_up',
     ];
     private const POLICY_DEFAULTS = [
         'for_not_following'    => 'accept',
@@ -67,7 +67,7 @@ class NotificationsCtrl
 
     private function groupKeyFor(array $n): string
     {
-        $statusScoped = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct'];
+        $statusScoped = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct', 'quote', 'quoted_update'];
         if (($n['status_id'] ?? '') !== '' && in_array($n['type'], $statusScoped, true)) {
             return $n['type'] . ':status:' . $n['status_id'];
         }
@@ -187,7 +187,7 @@ class NotificationsCtrl
 
     private function hasRenderableStatus(array $n, string $viewerId): bool
     {
-        $statusTypes = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct'];
+        $statusTypes = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct', 'quote', 'quoted_update'];
         if (!in_array((string)($n['type'] ?? ''), $statusTypes, true)) {
             return true;
         }
@@ -201,6 +201,60 @@ class NotificationsCtrl
         return StatusModel::toMasto($status, $viewerId) !== null;
     }
 
+    private function canRenderNotification(array $n, array $me): bool
+    {
+        if ($this->isHiddenFromViewer($me['id'], (string)($n['from_acct_id'] ?? ''))) {
+            return false;
+        }
+        if (!$this->hasRenderableStatus($n, $me['id'])) {
+            return false;
+        }
+        return $this->resolveNotificationAccount((string)($n['from_acct_id'] ?? '')) !== null;
+    }
+
+    private function resolveNotificationAccount(string $fromId): ?array
+    {
+        if ($fromId === '') return null;
+
+        static $actorCache = [];
+        static $queuedRefresh = [];
+
+        $local = UserModel::byId($fromId);
+        if ($local) {
+            return UserModel::toMasto($local);
+        }
+
+        $ra = DB::one('SELECT * FROM remote_actors WHERE id=?', [$fromId]);
+        if ($ra) {
+            if (!isset($actorCache[$fromId])) {
+                $age = time() - (int)strtotime((string)($ra['fetched_at'] ?? ''));
+                $hasZeroCounts = (int)($ra['follower_count'] ?? 0) === 0 && (int)($ra['following_count'] ?? 0) === 0;
+                if (($age > 3600 || ($hasZeroCounts && $age > 60)) && !isset($queuedRefresh[$fromId])) {
+                    $queuedRefresh[$fromId] = true;
+                    defer_after_response(function () use ($fromId): void {
+                        if (throttle_allow('remote_actor_refresh:' . $fromId, 1800)) {
+                            RemoteActorModel::fetch($fromId, true);
+                        }
+                    });
+                }
+                $actorCache[$fromId] = $ra;
+            } else {
+                $ra = $actorCache[$fromId];
+            }
+            return UserModel::remoteToMasto($ra);
+        }
+
+        if (str_starts_with($fromId, 'http')) {
+            $ra = RemoteActorModel::fetch($fromId, true);
+            if ($ra) {
+                $actorCache[$fromId] = $ra;
+                return UserModel::remoteToMasto($ra);
+            }
+        }
+
+        return null;
+    }
+
     private function requestRows(array $user, int $limit, ?string $maxId, ?string $sinceId, ?string $minId, ?array $types, array $excl): array
     {
         $scanLimit = max(200, min(5000, $limit * 20));
@@ -212,8 +266,7 @@ class NotificationsCtrl
         $filtered = [];
         foreach ($rows as $row) {
             if (!$this->notificationRequiresRequest($row, $user['id'], $policy)) continue;
-            if ($this->isHiddenFromViewer($user['id'], (string)($row['from_acct_id'] ?? ''))) continue;
-            if (!$this->hasRenderableStatus($row, $user['id'])) continue;
+            if (!$this->canRenderNotification($row, $user)) continue;
             $filtered[] = $row;
             if (count($filtered) >= $limit) break;
         }
@@ -231,8 +284,7 @@ class NotificationsCtrl
         $visible = [];
         foreach ($rows as $row) {
             if ($this->notificationRequiresRequest($row, $user['id'], $policy)) continue;
-            if ($this->isHiddenFromViewer($user['id'], (string)($row['from_acct_id'] ?? ''))) continue;
-            if (!$this->hasRenderableStatus($row, $user['id'])) continue;
+            if (!$this->canRenderNotification($row, $user)) continue;
             $visible[] = $row;
             if (count($visible) >= $limit) break;
         }
@@ -246,8 +298,7 @@ class NotificationsCtrl
         $policy = $this->loadPolicy($user);
         $count = 0;
         foreach ($rows as $row) {
-            if ($this->isHiddenFromViewer($user['id'], (string)($row['from_acct_id'] ?? ''))) continue;
-            if (!$this->hasRenderableStatus($row, $user['id'])) continue;
+            if (!$this->canRenderNotification($row, $user)) continue;
             if ($this->notificationRequiresRequest($row, $user['id'], $policy)) {
                 $count++;
             }
@@ -270,8 +321,7 @@ class NotificationsCtrl
         $count = 0;
         foreach ($rows as $row) {
             if ($this->notificationRequiresRequest($row, $user['id'], $policy)) continue;
-            if ($this->isHiddenFromViewer($user['id'], (string)($row['from_acct_id'] ?? ''))) continue;
-            if (!$this->hasRenderableStatus($row, $user['id'])) continue;
+            if (!$this->canRenderNotification($row, $user)) continue;
             $count++;
         }
         return $count;
@@ -399,6 +449,36 @@ class NotificationsCtrl
                 'user_id'      => $userId,
                 'from_acct_id' => $row['from_acct_id'],
                 'type'         => 'reblog',
+                'status_id'    => $row['status_id'],
+                'read_at'      => null,
+                'created_at'   => $row['created_at'] ?: now_iso(),
+            ]);
+        }
+
+        $quoteRows = DB::all(
+            "SELECT st.user_id AS from_acct_id, st.id AS status_id, st.created_at
+             FROM statuses st
+             JOIN statuses orig ON orig.id=st.quote_of_id
+             LEFT JOIN notifications n
+               ON n.user_id=orig.user_id
+              AND n.from_acct_id=st.user_id
+              AND n.type='quote'
+              AND n.status_id=st.id
+             WHERE orig.user_id=?
+               AND orig.local=1
+               AND st.quote_of_id IS NOT NULL
+               AND st.user_id<>orig.user_id
+               AND n.id IS NULL
+             ORDER BY st.created_at DESC
+             LIMIT 200",
+            [$userId]
+        );
+        foreach ($quoteRows as $row) {
+            DB::insertIgnore('notifications', [
+                'id'           => $this->nextNumericNotificationId((string)($row['created_at'] ?? now_iso())),
+                'user_id'      => $userId,
+                'from_acct_id' => $row['from_acct_id'],
+                'type'         => 'quote',
                 'status_id'    => $row['status_id'],
                 'read_at'      => null,
                 'created_at'   => $row['created_at'] ?: now_iso(),
@@ -609,51 +689,10 @@ class NotificationsCtrl
      */
     public function fmtPublic(array $n, array $me): ?array
     {
-        $fromId  = $n['from_acct_id'];
-        $fromAcc = null;
-
-        if ($this->isHiddenFromViewer($me['id'], (string)$fromId)) {
+        if (!$this->canRenderNotification($n, $me)) {
             return null;
         }
-
-        // Per-request cache: avoid duplicate HTTP fetches for the same actor
-        // when multiple notifications arrive from the same account.
-        static $actorCache = [];
-        static $queuedRefresh = [];
-
-        $local = UserModel::byId($fromId);
-        if ($local) {
-            $fromAcc = UserModel::toMasto($local);
-        } else {
-            $ra = DB::one('SELECT * FROM remote_actors WHERE id=?', [$fromId]);
-            if ($ra) {
-                if (!isset($actorCache[$fromId])) {
-                    $age = time() - (int)strtotime($ra['fetched_at']);
-                    $hasZeroCounts = (int)$ra['follower_count'] === 0 && (int)$ra['following_count'] === 0;
-                    if (($age > 3600 || ($hasZeroCounts && $age > 60)) && !isset($queuedRefresh[$fromId])) {
-                        $queuedRefresh[$fromId] = true;
-                        // Never block notification rendering on remote profile refreshes.
-                        // A single stale remote actor could otherwise add multiple network
-                        // round-trips here and make the notifications screen feel hung.
-                        defer_after_response(function () use ($fromId): void {
-                            if (throttle_allow('remote_actor_refresh:' . $fromId, 1800)) {
-                                RemoteActorModel::fetch($fromId, true);
-                            }
-                        });
-                    }
-                    $actorCache[$fromId] = $ra;
-                } else {
-                    $ra = $actorCache[$fromId];
-                }
-                $fromAcc = UserModel::remoteToMasto($ra);
-            } elseif (str_starts_with($fromId, 'http')) {
-                $ra = RemoteActorModel::fetch($fromId, true);
-                if ($ra) {
-                    $actorCache[$fromId] = $ra;
-                    $fromAcc = UserModel::remoteToMasto($ra);
-                }
-            }
-        }
+        $fromAcc = $this->resolveNotificationAccount((string)($n['from_acct_id'] ?? ''));
         if (!$fromAcc) return null;
 
         $out = [
@@ -669,7 +708,7 @@ class NotificationsCtrl
         ];
 
         // Always include 'status' field — Ivory/Swift Codable requires key present even if null
-        $statusTypes = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct'];
+        $statusTypes = ['mention', 'reblog', 'favourite', 'poll', 'update', 'status', 'direct', 'quote', 'quoted_update'];
         $s = (in_array($n['type'], $statusTypes) && $n['status_id'])
             ? StatusModel::byId($n['status_id'])
             : null;

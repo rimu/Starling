@@ -13,6 +13,7 @@ class PreferencesCtrl
         'posting:default:visibility'  => 'public',
         'posting:default:sensitive'   => false,
         'posting:default:language'    => null,
+        'posting:default:quote_policy'=> 'public',
         'posting:default:expire_after'=> null,
         'reading:expand:media'        => 'default',
         'reading:expand:spoilers'     => false,
@@ -66,10 +67,15 @@ class SessionsCtrl
         $scope = (string)($body['scope'] ?? '');
 
         if ($tokenId !== '') {
-            $row = DB::one('SELECT token FROM oauth_tokens WHERE token=? AND user_id=?', [$tokenId, $user['id']]);
+            $tokenValues = array_values(array_unique([$tokenId, OAuthModel::tokenStorageValue($tokenId)]));
+            $placeholders = implode(',', array_fill(0, count($tokenValues), '?'));
+            $row = DB::one(
+                'SELECT token FROM oauth_tokens WHERE token IN (' . $placeholders . ') AND user_id=?',
+                array_merge($tokenValues, [$user['id']])
+            );
             if (!$row) err_out('Not found', 404);
-            DB::delete('oauth_tokens', 'token=? AND user_id=?', [$tokenId, $user['id']]);
-            json_out(['revoked' => 1, 'current' => hash_equals($currentToken, $tokenId)]);
+            DB::delete('oauth_tokens', 'token=? AND user_id=?', [(string)$row['token'], $user['id']]);
+            json_out(['revoked' => 1, 'current' => hash_equals($currentToken, (string)$row['token'])]);
         }
 
         if ($scope === 'others') {
@@ -95,6 +101,23 @@ class SessionsCtrl
 
 class DeveloperAppsCtrl
 {
+    private function requireDeveloperAccess(): array
+    {
+        return require_auth(['write', 'write:accounts']);
+    }
+
+    private function currentTokenScopes(): string
+    {
+        return (string)((auth_context()['token']['scopes'] ?? '') ?: '');
+    }
+
+    private function scopesWithinCurrentGrant(string $requested, string $appAllowed = 'read write follow push'): string
+    {
+        $appScoped = OAuthModel::normalizeScopes($requested, $appAllowed);
+        if ($appScoped === '') return '';
+        return OAuthModel::normalizeScopes($appScoped, $this->currentTokenScopes());
+    }
+
     private function fmtToken(array $row): array
     {
         $token = (string)($row['token'] ?? '');
@@ -129,12 +152,12 @@ class DeveloperAppsCtrl
 
     public function create(array $p): void
     {
-        $user = require_auth(['write', 'write:filters']);
+        $user = $this->requireDeveloperAccess();
         $d = req_body();
         $clientName = trim((string)($d['client_name'] ?? ''));
         if ($clientName === '') err_out('Application name required', 422);
         $requestedScopes = (string)($d['scopes'] ?? $d['scope'] ?? 'read write follow');
-        $scopes = OAuthModel::normalizeScopes($requestedScopes);
+        $scopes = $this->scopesWithinCurrentGrant($requestedScopes);
         if ($scopes === '') err_out('invalid_scope', 422);
         $app = OAuthModel::createApp([
             'owner_user_id' => $user['id'],
@@ -148,7 +171,7 @@ class DeveloperAppsCtrl
 
     public function delete(array $p): void
     {
-        $user = require_auth(['write', 'write:filters']);
+        $user = $this->requireDeveloperAccess();
         $appId = (string)($p['id'] ?? '');
         $app = OAuthModel::appById($appId);
         if (!$app || (string)($app['owner_user_id'] ?? '') !== $user['id']) err_out('Not found', 404);
@@ -158,12 +181,12 @@ class DeveloperAppsCtrl
 
     public function createToken(array $p): void
     {
-        $user = require_auth(['write', 'write:filters']);
+        $user = $this->requireDeveloperAccess();
         $appId = (string)($p['id'] ?? '');
         $app = OAuthModel::appById($appId);
         if (!$app || (string)($app['owner_user_id'] ?? '') !== $user['id']) err_out('Not found', 404);
         $d = req_body();
-        $scopes = OAuthModel::normalizeScopes((string)($d['scopes'] ?? $d['scope'] ?? ''), (string)($app['scopes'] ?? ''));
+        $scopes = $this->scopesWithinCurrentGrant((string)($d['scopes'] ?? $d['scope'] ?? ''), (string)($app['scopes'] ?? ''));
         if ($scopes === '') err_out('invalid_scope', 422);
         $token = OAuthModel::createToken($appId, $user['id'], $scopes);
         json_out([
@@ -171,23 +194,26 @@ class DeveloperAppsCtrl
             'token_type' => 'Bearer',
             'scope' => $scopes,
             'created_at' => time(),
+            'expires_in' => OAuthModel::tokenExpiresIn(),
             'app' => OAuthModel::appToMasto($app),
         ], 201);
     }
 
     public function revokeToken(array $p): void
     {
-        $user = require_auth(['write', 'write:filters']);
+        $user = $this->requireDeveloperAccess();
         $token = (string)($p['token'] ?? '');
+        $tokenValues = array_values(array_unique([$token, OAuthModel::tokenStorageValue($token)]));
+        $placeholders = implode(',', array_fill(0, count($tokenValues), '?'));
         $row = DB::one(
             'SELECT t.token
                FROM oauth_tokens t
                JOIN oauth_apps a ON a.id=t.app_id
-              WHERE t.token=? AND t.user_id=? AND a.owner_user_id=?',
-            [$token, $user['id'], $user['id']]
+              WHERE t.token IN (' . $placeholders . ') AND t.user_id=? AND a.owner_user_id=?',
+            array_merge($tokenValues, [$user['id'], $user['id']])
         );
         if (!$row) err_out('Not found', 404);
-        DB::delete('oauth_tokens', 'token=?', [$token]);
+        OAuthModel::revoke($token);
         json_out(['revoked' => true]);
     }
 }
@@ -240,7 +266,7 @@ class AccountLifecycleCtrl
 {
     public function delete(array $p): void
     {
-        $user = require_auth(['write', 'write:filters']);
+        $user = require_auth(['write', 'write:accounts']);
         $d = req_body();
         $password = (string)($d['current_password'] ?? '');
         if ($password === '' || !password_verify($password, (string)($user['password'] ?? ''))) {
@@ -414,7 +440,7 @@ class FiltersCtrl
 
     public function update(array $p): void
     {
-        $user = require_auth(['write', 'write:accounts']);
+        $user = require_auth(['write', 'write:filters']);
         $f    = DB::one('SELECT * FROM filters WHERE id=? AND user_id=?', [$p['id'], $user['id']]);
         if (!$f) err_out('Not found', 404);
         $d = req_body();

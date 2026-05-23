@@ -759,18 +759,32 @@ class AdminModel
 
     // ── Inbox log ────────────────────────────────────────────
 
-    public static function inboxLog(int $page = 1, string $type = '', bool $errorsOnly = false): array
+    public static function inboxLog(int $page = 1, string $type = '', $status = 'all', bool $errorsOnly = false): array
     {
         $limit  = 50;
         $offset = ($page - 1) * $limit;
         $where  = '1=1'; $params = [];
+        if (is_bool($status)) {
+            $errorsOnly = $status;
+            $status = 'all';
+        }
+        $status = (string)$status;
+        if (!in_array($status, ['all', 'accepted', 'ignored', 'rejected'], true)) {
+            $status = 'all';
+        }
 
         if ($type)       { $where .= ' AND type=?';   $params[] = $type; }
-        if ($errorsOnly) { $where .= " AND error!=''"; }
+        if ($status !== 'all') {
+            $where .= ' AND disposition=?';
+            $params[] = $status;
+        }
+        if ($errorsOnly) {
+            $where .= " AND error!=''";
+        }
 
         $total = DB::count('inbox_log', $where, $params);
         $rows  = DB::all(
-            "SELECT id,actor_url,type,error,request_method,request_path,remote_ip,created_at FROM inbox_log
+            "SELECT id,actor_url,type,error,disposition,request_method,request_path,remote_ip,created_at FROM inbox_log
              WHERE $where ORDER BY created_at DESC LIMIT $limit OFFSET $offset",
             $params
         );
@@ -845,11 +859,19 @@ class AdminModel
             ]
         );
 
+        $newLog = DB::one(
+            "SELECT id, disposition, error FROM inbox_log WHERE sig_debug LIKE ? ORDER BY created_at DESC LIMIT 1",
+            ['%"of":"' . $id . '"%']
+        );
+
         return [
             'ok' => true,
             'accepted' => $accepted,
             'actor_url' => (string)($row['actor_url'] ?? ''),
             'type' => (string)($row['type'] ?? ''),
+            'new_log_id' => (string)($newLog['id'] ?? ''),
+            'new_disposition' => (string)($newLog['disposition'] ?? ($accepted ? 'accepted' : 'rejected')),
+            'new_error' => (string)($newLog['error'] ?? ''),
         ];
     }
 

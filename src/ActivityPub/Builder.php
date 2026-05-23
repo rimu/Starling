@@ -39,6 +39,7 @@ class Builder
             'gts'         => 'https://gotosocial.org/ns#',
             'interactionPolicy' => ['@id' => 'gts:interactionPolicy', '@type' => '@id'],
             'canFeature'  => 'gts:canFeature',
+            'canQuote'    => 'gts:canQuote',
             'automaticApproval' => ['@id' => 'gts:automaticApproval', '@type' => '@id'],
             'manualApproval' => ['@id' => 'gts:manualApproval', '@type' => '@id'],
         ],
@@ -163,6 +164,12 @@ class Builder
         }
 
         $lang = $s['language'] ?? 'pt';
+        $quotePolicy = \App\Models\StatusModel::normalizeQuotePolicy($s['quote_policy'] ?? null, (string)($s['visibility'] ?? 'public'));
+        $quoteAudience = match ($quotePolicy) {
+            'public'    => ['https://www.w3.org/ns/activitystreams#Public'],
+            'followers' => [$actorUrl . '/followers'],
+            default     => [$actorUrl],
+        };
 
         $result = [
             'type'        => $poll ? 'Question' : 'Note',
@@ -177,6 +184,12 @@ class Builder
             'sensitive'   => (bool)$s['sensitive'],
             'tag'         => $tags,
             'attachment'  => self::buildAttachments($s['id']),
+            'interactionPolicy' => [
+                'canQuote' => [
+                    'automaticApproval' => $quoteAudience,
+                    'manualApproval'    => [],
+                ],
+            ],
             'replies'     => $poll ? null : [
                 'type'       => 'Collection',
                 'id'         => $s['uri'] . '/replies',

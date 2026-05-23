@@ -194,7 +194,7 @@ class OAuthCtrl
             'token_type'   => 'Bearer',
             'scope'        => $scopes,
             'created_at'   => time(),
-            'expires_in'   => 315360000, // ~10 years — tokens don't expire unless revoked
+            'expires_in'   => OAuthModel::tokenExpiresIn(),
         ]);
     }
 

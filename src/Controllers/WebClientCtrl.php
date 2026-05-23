@@ -404,8 +404,8 @@ class WebClientCtrl
 
     private function renderShellView(string $view, ?string $viewId = null, ?string $composeText = null): void
     {
-        [$user, $token] = $this->requireAuth();
-        $this->html($this->shell($view, $viewId, $user, $token, $composeText));
+        [$user] = $this->requireAuth();
+        $this->html($this->shell($view, $viewId, $user, $composeText));
     }
 
     // ── Output helpers ────────────────────────────────────────────────────────
@@ -415,7 +415,7 @@ class WebClientCtrl
         header('Content-Type: text/html; charset=utf-8');
         header('Cache-Control: no-store, no-cache');
         header('X-Content-Type-Options: nosniff');
-        header("Content-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'self';");
+        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
         echo $s;
         exit;
     }
@@ -428,10 +428,10 @@ class WebClientCtrl
 
     // ── Shell (SPA wrapper) ───────────────────────────────────────────────────
 
-    private function shell(string $view, ?string $viewId, array $user, string $token, ?string $composeText = null): string
+    private function shell(string $view, ?string $viewId, array $user, ?string $composeText = null): string
     {
         $this->startSession();
-        $bootData = $this->shellBootData($view, $viewId, $user, $token, $composeText);
+        $bootData = $this->shellBootData($view, $viewId, $user, $composeText);
         $bootJson = json_encode($bootData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
         $domain   = htmlspecialchars(AP_DOMAIN, ENT_QUOTES);
         $webCsrf  = htmlspecialchars((string)($_SESSION['web_csrf'] ?? ''), ENT_QUOTES);
@@ -643,16 +643,14 @@ class WebClientCtrl
   </form>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script>' . $this->js() . '</script>
 </body>
 </html>';
     }
 
-    private function shellBootData(string $view, ?string $viewId, array $user, string $token, ?string $composeText = null): array
+    private function shellBootData(string $view, ?string $viewId, array $user, ?string $composeText = null): array
     {
         return [
-            'token'         => $token,
             'domain'        => AP_DOMAIN,
             'myId'          => $user['id'],
             'myUsername'    => $user['username'],
@@ -1284,6 +1282,11 @@ button{font-family:inherit}
 .cw-toggle:hover{background:var(--blue-bg);border-color:var(--blue);color:var(--blue)}
 
 /* Content */
+.status-title{
+  font-size:.98rem;font-weight:750;line-height:1.28;margin:.12rem 0 .4rem;
+  color:var(--text);word-break:break-word
+}
+.status-card.status-focal .status-title{font-size:1.18rem;margin-top:.2rem}
 .s-content{font-size:.9rem;line-height:1.5;word-break:break-word;margin-bottom:.5rem}
 .s-content.truncated{max-height:12rem;overflow:hidden;position:relative}
 .s-content.truncated::after{
@@ -1388,6 +1391,7 @@ button{font-family:inherit}
 .quote-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0}
 .quote-meta{display:flex;flex-wrap:wrap;gap:.35rem;font-size:.8rem;color:var(--text3)}
 .quote-meta strong{color:var(--text);font-weight:700}
+.quote-title{font-size:.88rem;font-weight:750;line-height:1.3;color:var(--text);margin-bottom:.3rem;word-break:break-word}
 .quote-content{font-size:.86rem;line-height:1.45;color:var(--text);word-break:break-word}
 .quote-content p{margin-bottom:.25rem}
 .quote-content p:last-child{margin-bottom:0}
@@ -2403,7 +2407,7 @@ const Toast = {
 // ── API ────────────────────────────────────────────────────────────────────
 const Api = {
     async _fetch(method, path, body) {
-        const opts = {method, credentials: 'same-origin', headers: {Authorization: 'Bearer ' + WCFG.token}};
+        const opts = {method, credentials: 'same-origin', headers: {}};
         if (body instanceof FormData) {
             opts.body = body;
         } else if (body) {
@@ -2423,7 +2427,7 @@ const Api = {
         try { return JSON.parse(t); } catch { return t; }
     },
     async _fetchPage(method, path, body) {
-        const opts = {method, credentials: 'same-origin', headers: {Authorization: 'Bearer ' + WCFG.token}};
+        const opts = {method, credentials: 'same-origin', headers: {}};
         if (body instanceof FormData) {
             opts.body = body;
         } else if (body) {
@@ -2507,17 +2511,20 @@ function renderCard(card) {
 }
 
 function renderQuote(quote) {
-    if (!quote || !quote.account) return '';
-    const acct = quote.account;
-    const mediaCount = Math.min((quote.media_attachments || []).length, 4);
+    const quoted = quote?.quoted_status || quote;
+    if (!quoted || !quoted.account) return '';
+    const acct = quoted.account;
+    const mediaCount = Math.min((quoted.media_attachments || []).length, 4);
     const mediaBadge = mediaCount ? `<span class="quote-badge">${mediaCount} media</span>` : '';
-    const pollBadge = quote.poll ? '<span class="quote-badge">Poll</span>' : '';
-    return `<div class="quote-card" onclick="event.stopPropagation();navigate('THREAD','${escJsSq(quote.id)}')">
+    const pollBadge = quoted.poll ? '<span class="quote-badge">Poll</span>' : '';
+    const titleHtml = quoted.title ? `<div class="quote-title">${esc(quoted.title)}</div>` : '';
+    return `<div class="quote-card" onclick="event.stopPropagation();if(event.target.closest('a,button,input,textarea,select,label'))return;navigate('THREAD','${escJsSq(quoted.id)}')">
         <div class="quote-head">
             <img class="quote-avatar" src="${esc(acct.avatar)}" alt="" loading="lazy">
             <div class="quote-meta"><strong>${esc(acct.display_name || acct.username)}</strong><span>@${esc(acct.acct)}</span></div>
         </div>
-        <div class="quote-content">${quote.content || '<p></p>'}</div>
+        ${titleHtml}
+        <div class="quote-content">${quoted.content || '<p></p>'}</div>
         ${(mediaBadge || pollBadge) ? `<div class="quote-flags">${mediaBadge}${pollBadge}</div>` : ''}
     </div>`;
 }
@@ -2608,6 +2615,7 @@ function renderStatus(s, focal = false) {
     const hasCW = !!post.spoiler_text;
     const collapseCW = hasCW && !UIPREFS.expandSpoilers;
     const cwBar = hasCW ? `<div class="cw-bar"><span>${esc(post.spoiler_text)}</span><button class="cw-toggle" onclick="toggleCWContent(this)">${collapseCW ? 'Show more' : 'Hide content'}</button></div>` : '';
+    const titleHtml = post.title ? `<div class="status-title">${esc(post.title)}</div>` : '';
 
     const contentStyle = collapseCW ? 'display:none' : '';
 
@@ -2679,6 +2687,7 @@ function renderStatus(s, focal = false) {
                     </button>
                 </div>
                 ${replyTo}
+                ${titleHtml}
                 ${cwBar}
                 <div class="cw-wrapper">
                     <div class="cw-content" style="${contentStyle}">
@@ -4918,7 +4927,7 @@ async function exportFollowCsv(type) {
     try {
         const allowed = type === 'followers' ? 'followers' : 'following';
         const res = await fetch('/api/v1/follows/export?type=' + encodeURIComponent(allowed), {
-            headers: {Authorization: 'Bearer ' + WCFG.token},
+            credentials: 'same-origin',
         });
         if (!res.ok) throw new Error(await res.text() || 'Export failed');
         const blob = await res.blob();

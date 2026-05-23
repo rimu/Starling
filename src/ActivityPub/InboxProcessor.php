@@ -62,6 +62,633 @@ class InboxProcessor
         return true;
     }
 
+    private static function canonicalActorIdentity(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '') return '';
+        $parts = parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return rtrim($url, '/');
+        }
+        $scheme = strtolower((string)($parts['scheme'] ?? 'https'));
+        $host = strtolower((string)$parts['host']);
+        $port = isset($parts['port']) ? ':' . (int)$parts['port'] : '';
+        $path = rtrim((string)($parts['path'] ?? ''), '/');
+        $query = isset($parts['query']) ? '?' . (string)$parts['query'] : '';
+        return $scheme . '://' . $host . $port . $path . $query;
+    }
+
+    private static function sameActorIdentity(string $a, string $b): bool
+    {
+        $left = self::canonicalActorIdentity($a);
+        $right = self::canonicalActorIdentity($b);
+        return $left !== '' && $right !== '' && hash_equals($left, $right);
+    }
+
+    private static function canDeriveMissingActorFromSignature(string $type): bool
+    {
+        return $type === 'FeatureRequest';
+    }
+
+    private static function verifyActivityActorProof(array $activity, string $actorId): array
+    {
+        if ($actorId === '') {
+            return ['ok' => false, 'type' => '', 'error' => 'activity_actor_missing', 'key_id' => '', 'actor_url' => ''];
+        }
+
+        if (CryptoModel::verifyObjectSignature($activity, $actorId)) {
+            return ['ok' => true, 'type' => 'DataIntegrityProof', 'error' => '', 'key_id' => '', 'actor_url' => $actorId];
+        }
+
+        $rsa = CryptoModel::verifyRsaSignature2017Detailed($activity, $actorId);
+        $rsa['type'] = 'RsaSignature2017';
+        return $rsa;
+    }
+
+    private static function verifyForwardedObjectByOriginFetch(array $activity, string $actorId, string $signedActor): array
+    {
+        $activityType = (string)($activity['type'] ?? '');
+        if (!in_array($activityType, ['Create', 'Update', 'Delete'], true)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'unsupported_activity_type'];
+        }
+        if ($actorId === '' || $signedActor === '') {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'missing_actor'];
+        }
+        if ($activityType === 'Delete') {
+            return self::verifyForwardedDelete($activity, $actorId, $signedActor);
+        }
+        $forwarderAllowed = self::sameActorIdentity($actorId, $signedActor)
+            || self::forwarderMayDeliverActivity($activity, $signedActor);
+        $publicOriginCandidate = self::activityOrObjectIsPublic($activity);
+        if (!$forwarderAllowed && !$publicOriginCandidate) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'http_signer_not_addressed_or_relay'];
+        }
+
+        $obj = $activity['object'] ?? null;
+        if (!is_array($obj)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'create_object_not_inline'];
+        }
+
+        $objectType = (string)($obj['type'] ?? '');
+        $objectId = trim((string)($obj['id'] ?? ''));
+
+        $actorTypes = ['Person', 'Service', 'Application', 'Group', 'Organization'];
+        if (($activity['type'] ?? '') === 'Update' && in_array($objectType, $actorTypes, true)) {
+            if (!$forwarderAllowed) {
+                return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'http_signer_not_addressed_or_relay'];
+            }
+            return self::verifyForwardedActorUpdateByOriginFetch($obj, $actorId, $objectId);
+        }
+
+        $noteTypes = ['Note', 'Article', 'Page', 'Question', 'Video', 'Audio', 'Event'];
+        if (!in_array($objectType, $noteTypes, true)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'unsupported_object_type'];
+        }
+        if (!self::objectAttributedToMatchesActor($obj, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'object_attributed_to_mismatch'];
+        }
+
+        if ($objectId === '' || !self::urlHostMatches($objectId, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'object_not_on_actor_origin'];
+        }
+
+        $fetched = RemoteActorModel::httpGetDetailed(
+            $objectId,
+            'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/ld+json'
+        );
+        if (!$fetched['ok'] || !is_array($fetched['data'])) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_fetch_failed:' . (string)($fetched['error'] ?? ''),
+                'url' => $objectId,
+                'http_code' => (int)($fetched['http_code'] ?? 0),
+            ];
+        }
+
+        $remote = $fetched['data'];
+        if (!self::sameActorIdentity($objectId, (string)($remote['id'] ?? ''))) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_object_id_mismatch', 'url' => $objectId];
+        }
+        if (($remote['type'] ?? '') !== ($obj['type'] ?? '')) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_object_type_mismatch', 'url' => $objectId];
+        }
+        if (!self::objectAttributedToMatchesActor($remote, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_attributed_to_mismatch', 'url' => $objectId];
+        }
+        if (!$forwarderAllowed && !self::activityOrObjectIsPublic($remote)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_object_not_public_for_untrusted_forwarder', 'url' => $objectId];
+        }
+        if (!self::forwardedObjectMatchesOrigin($obj, $remote)) {
+            if (($activity['type'] ?? '') === 'Update') {
+                $activityProof = self::verifyForwardedUpdateByOriginActivity($obj, $actorId, $objectId);
+                if (!empty($activityProof['ok'])) {
+                    return $activityProof;
+                }
+            }
+            return [
+                'ok' => true,
+                'type' => 'origin_fetch',
+                'error' => '',
+                'url' => $objectId,
+                'object_replaced' => true,
+                'note' => 'origin_current_version_used_after_content_mismatch',
+                '_object' => $remote,
+            ];
+        }
+
+        $result = ['ok' => true, 'type' => 'origin_fetch', 'error' => '', 'url' => $objectId];
+        if (!$forwarderAllowed) {
+            $result['note'] = 'public_origin_object_confirmed_for_untrusted_forwarder';
+        }
+        return $result;
+    }
+
+    private static function verifyForwardedDelete(array $activity, string $actorId, string $signedActor): array
+    {
+        if (!self::sameActorIdentity($actorId, $signedActor)
+            && !self::forwarderMayDeliverActivity($activity, $signedActor)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'http_signer_not_addressed_or_relay'];
+        }
+
+        $obj = $activity['object'] ?? null;
+        $objectId = '';
+        if (is_string($obj)) {
+            $objectId = trim($obj);
+        } elseif (is_array($obj)) {
+            $objectId = trim((string)($obj['id'] ?? ''));
+        }
+
+        if ($objectId === '') {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'delete_object_id_missing'];
+        }
+        if (!self::sameActorIdentity($objectId, $actorId) && !self::urlHostMatches($objectId, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'delete_object_not_on_actor_origin', 'url' => $objectId];
+        }
+
+        return [
+            'ok' => true,
+            'type' => 'origin_fetch',
+            'error' => '',
+            'url' => $objectId,
+            'note' => 'forwarded_delete_confirmed',
+        ];
+    }
+
+    private static function verifyForwardedUpdateByOriginActivity(array $receivedObj, string $actorId, string $objectId): array
+    {
+        $activityUrl = self::originActivityUrlForObject($objectId);
+        if ($activityUrl === '') {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_activity_url_unavailable', 'url' => $objectId];
+        }
+
+        $fetched = RemoteActorModel::httpGetDetailed(
+            $activityUrl,
+            'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/ld+json'
+        );
+        if (!$fetched['ok'] || !is_array($fetched['data'])) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_fetch_failed:' . (string)($fetched['error'] ?? ''),
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+                'http_code' => (int)($fetched['http_code'] ?? 0),
+            ];
+        }
+
+        $originActivity = $fetched['data'];
+        if (!in_array((string)($originActivity['type'] ?? ''), ['Create', 'Update'], true)) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_type_mismatch',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+        $originActor = is_string($originActivity['actor'] ?? null)
+            ? $originActivity['actor']
+            : (string)($originActivity['actor']['id'] ?? '');
+        if (!self::sameActorIdentity($originActor, $actorId)) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_actor_mismatch',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+
+        $originObj = $originActivity['object'] ?? null;
+        if (!is_array($originObj)) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_object_not_inline',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+        if (!self::sameActorIdentity($objectId, (string)($originObj['id'] ?? ''))) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_object_id_mismatch',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+        if (($originObj['type'] ?? '') !== ($receivedObj['type'] ?? '')) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_object_type_mismatch',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+        if (!self::objectAttributedToMatchesActor($originObj, $actorId)) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_activity_attributed_to_mismatch',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+            ];
+        }
+
+        if (!self::forwardedObjectMatchesOrigin($receivedObj, $originObj)) {
+            return [
+                'ok' => true,
+                'type' => 'origin_fetch',
+                'error' => '',
+                'url' => $objectId,
+                'activity_url' => $activityUrl,
+                'object_replaced' => true,
+                'note' => 'origin_activity_current_version_used_after_content_mismatch',
+                '_object' => $originObj,
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'type' => 'origin_fetch',
+            'error' => '',
+            'url' => $objectId,
+            'activity_url' => $activityUrl,
+            'note' => 'origin_activity_object_matched',
+            '_object' => $originObj,
+        ];
+    }
+
+    private static function verifyForwardedActorUpdateByOriginFetch(array $receivedObj, string $actorId, string $objectId): array
+    {
+        if ($objectId === '' || !self::sameActorIdentity($objectId, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'actor_update_object_id_mismatch'];
+        }
+        if (!self::urlHostMatches($objectId, $actorId)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'actor_update_not_on_actor_origin', 'url' => $objectId];
+        }
+
+        $fetched = RemoteActorModel::httpGetDetailed(
+            $objectId,
+            'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/ld+json'
+        );
+        if (!$fetched['ok'] || !is_array($fetched['data'])) {
+            return [
+                'ok' => false,
+                'type' => 'origin_fetch',
+                'error' => 'origin_actor_fetch_failed:' . (string)($fetched['error'] ?? ''),
+                'url' => $objectId,
+                'http_code' => (int)($fetched['http_code'] ?? 0),
+            ];
+        }
+
+        $remote = $fetched['data'];
+        if (!self::sameActorIdentity($actorId, (string)($remote['id'] ?? ''))) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_actor_id_mismatch', 'url' => $objectId];
+        }
+
+        $actorTypes = ['Person', 'Service', 'Application', 'Group', 'Organization'];
+        if (!in_array((string)($remote['type'] ?? ''), $actorTypes, true)) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_actor_type_mismatch', 'url' => $objectId];
+        }
+        if (($receivedObj['type'] ?? '') !== ($remote['type'] ?? '')) {
+            return ['ok' => false, 'type' => 'origin_fetch', 'error' => 'origin_actor_update_type_mismatch', 'url' => $objectId];
+        }
+
+        return [
+            'ok' => true,
+            'type' => 'origin_fetch',
+            'error' => '',
+            'url' => $objectId,
+            'note' => 'origin_actor_object_confirmed',
+            '_object' => $remote,
+        ];
+    }
+
+    private static function originActivityUrlForObject(string $objectId): string
+    {
+        $parts = parse_url($objectId);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) return '';
+        if (!in_array(strtolower((string)$parts['scheme']), ['http', 'https'], true)) return '';
+
+        $path = rtrim((string)($parts['path'] ?? ''), '/');
+        if ($path === '') return '';
+        $port = isset($parts['port']) ? ':' . (int)$parts['port'] : '';
+        $query = isset($parts['query']) ? '?' . (string)$parts['query'] : '';
+        return strtolower((string)$parts['scheme']) . '://' . strtolower((string)$parts['host']) . $port . $path . '/activity' . $query;
+    }
+
+    private static function originObjectIsAtLeastAsNew(array $origin, array $received): bool
+    {
+        $receivedTs = self::apObjectVersionTimestamp($received);
+        $originTs = self::apObjectVersionTimestamp($origin);
+        if ($receivedTs === null || $originTs === null) return false;
+        return $originTs >= $receivedTs;
+    }
+
+    private static function apObjectVersionTimestamp(array $obj): ?int
+    {
+        foreach (['updated', 'published'] as $field) {
+            $raw = self::apStr($obj[$field] ?? '');
+            if ($raw === '') continue;
+            $ts = strtotime($raw);
+            if ($ts !== false) return $ts;
+        }
+        return null;
+    }
+
+    private static function isRetryReplaySignatureFailure(array $requestMeta, array $httpSigResult): bool
+    {
+        if (trim((string)($requestMeta['retry_of'] ?? '')) === '') return false;
+        $error = (string)($httpSigResult['error'] ?? '');
+        if (in_array($error, ['digest_mismatch', 'content_digest_mismatch'], true)) return true;
+        if (str_starts_with($error, 'signed_header_missing:')) return true;
+        return false;
+    }
+
+    private static function originFetchProofDebug(array $originProof): array
+    {
+        unset($originProof['_object']);
+        return $originProof;
+    }
+
+    private static function urlHostMatches(string $url, string $otherUrl): bool
+    {
+        $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+        $otherHost = strtolower((string)(parse_url($otherUrl, PHP_URL_HOST) ?? ''));
+        return $host !== '' && $host === $otherHost;
+    }
+
+    private static function forwarderMayDeliverActivity(array $activity, string $signedActor): bool
+    {
+        if (DB::one("SELECT 1 FROM relay_subscriptions WHERE actor_url=? AND status='accepted' LIMIT 1", [$signedActor])) {
+            return true;
+        }
+        foreach (self::activityAddressedActorIds($activity) as $recipient) {
+            if (self::sameActorIdentity($recipient, $signedActor)) return true;
+        }
+        if (self::activityReferencesActorOrigin($activity, $signedActor)) {
+            return true;
+        }
+        return false;
+    }
+
+    private static function activityTargetsCurrentInstance(array $activity): bool
+    {
+        $urls = [];
+        $collect = static function (mixed $value) use (&$urls): void {
+            if (is_string($value)) {
+                $urls[] = $value;
+                return;
+            }
+            if (!is_array($value)) return;
+            $items = array_is_list($value) ? $value : [$value];
+            foreach ($items as $item) {
+                if (is_string($item)) {
+                    $urls[] = $item;
+                } elseif (is_array($item) && is_string($item['id'] ?? null)) {
+                    $urls[] = $item['id'];
+                }
+            }
+        };
+
+        foreach (['id', 'actor', 'object', 'target', 'origin', 'instrument'] as $field) {
+            $collect($activity[$field] ?? null);
+        }
+        foreach (self::activityAddressedActorIds($activity) as $url) {
+            $collect($url);
+        }
+        foreach (self::activityReferenceUrls($activity) as $url) {
+            $collect($url);
+        }
+
+        $obj = $activity['object'] ?? null;
+        if (is_array($obj)) {
+            foreach (['id', 'actor', 'attributedTo', 'inReplyTo', 'quote', 'quoteUri', 'quoteUrl', '_misskey_quote', 'url'] as $field) {
+                $collect($obj[$field] ?? null);
+            }
+        }
+
+        foreach (array_unique($urls) as $url) {
+            if (preg_match('#^https?://#i', $url) === 1 && self::isCurrentInstanceActorUrl($url)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function forwardedActivityHasExpectedActorShape(array $activity, string $actorId): bool
+    {
+        $type = (string)($activity['type'] ?? '');
+        $obj = $activity['object'] ?? null;
+
+        if ($type === 'Delete') {
+            $objectId = is_string($obj) ? trim($obj) : (is_array($obj) ? trim((string)($obj['id'] ?? '')) : '');
+            return $objectId !== ''
+                && (self::sameActorIdentity($objectId, $actorId) || self::urlHostMatches($objectId, $actorId));
+        }
+
+        if (!is_array($obj)) return false;
+
+        $objectId = trim((string)($obj['id'] ?? ''));
+        $actorTypes = ['Person', 'Service', 'Application', 'Group', 'Organization'];
+        if ($type === 'Update' && in_array((string)($obj['type'] ?? ''), $actorTypes, true)) {
+            return $objectId !== ''
+                && self::sameActorIdentity($objectId, $actorId)
+                && self::urlHostMatches($objectId, $actorId);
+        }
+
+        $noteTypes = ['Note', 'Article', 'Page', 'Question', 'Video', 'Audio', 'Event'];
+        return in_array((string)($obj['type'] ?? ''), $noteTypes, true)
+            && $objectId !== ''
+            && self::urlHostMatches($objectId, $actorId)
+            && self::objectAttributedToMatchesActor($obj, $actorId);
+    }
+
+    private static function shouldSoftIgnoreUnverifiedForwardedActivity(array $activity, string $actorId, string $signedActor): bool
+    {
+        if ($actorId === '' || $signedActor === '') return false;
+        if (self::sameActorIdentity($actorId, $signedActor)) return false;
+        if (!in_array((string)($activity['type'] ?? ''), ['Create', 'Update', 'Delete'], true)) return false;
+        if (self::activityTargetsCurrentInstance($activity)) return false;
+        if (!self::activityOrObjectIsPublic($activity) && !self::forwarderMayDeliverActivity($activity, $signedActor)) return false;
+
+        return self::forwardedActivityHasExpectedActorShape($activity, $actorId);
+    }
+
+    private static function activityReferencesActorOrigin(array $activity, string $signedActor): bool
+    {
+        $signedHost = strtolower((string)(parse_url($signedActor, PHP_URL_HOST) ?? ''));
+        if ($signedHost === '') return false;
+
+        foreach (self::activityReferenceUrls($activity) as $url) {
+            $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+            if ($host !== '' && $host === $signedHost) return true;
+        }
+        return false;
+    }
+
+    private static function activityOrObjectIsPublic(array $activity): bool
+    {
+        foreach (['to', 'cc', 'bto', 'bcc', 'audience'] as $field) {
+            if (self::recipientValueIncludesPublic($activity[$field] ?? null)) return true;
+        }
+
+        $obj = $activity['object'] ?? null;
+        if (is_array($obj)) {
+            foreach (['to', 'cc', 'bto', 'bcc', 'audience'] as $field) {
+                if (self::recipientValueIncludesPublic($obj[$field] ?? null)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function recipientValueIncludesPublic(mixed $value): bool
+    {
+        $publicAliases = [
+            'https://www.w3.org/ns/activitystreams#Public',
+            'as:Public',
+            'Public',
+        ];
+        $items = is_array($value) && array_is_list($value) ? $value : [$value];
+        foreach ($items as $item) {
+            $id = '';
+            if (is_string($item)) {
+                $id = $item;
+            } elseif (is_array($item) && is_string($item['id'] ?? null)) {
+                $id = $item['id'];
+            }
+            if ($id !== '' && in_array($id, $publicAliases, true)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function activityReferenceUrls(array $activity): array
+    {
+        $urls = [];
+        $collect = static function (mixed $value) use (&$urls): void {
+            if (is_string($value)) {
+                $urls[] = $value;
+                return;
+            }
+            if (!is_array($value)) return;
+            $items = array_is_list($value) ? $value : [$value];
+            foreach ($items as $item) {
+                if (is_string($item)) {
+                    $urls[] = $item;
+                } elseif (is_array($item) && is_string($item['id'] ?? null)) {
+                    $urls[] = $item['id'];
+                }
+            }
+        };
+
+        foreach (['inReplyTo', 'quote', 'quoteUri', 'quoteUrl', '_misskey_quote'] as $field) {
+            $collect($activity[$field] ?? null);
+        }
+
+        $obj = $activity['object'] ?? null;
+        if (is_array($obj)) {
+            foreach (['inReplyTo', 'quote', 'quoteUri', 'quoteUrl', '_misskey_quote'] as $field) {
+                $collect($obj[$field] ?? null);
+            }
+        }
+
+        return array_values(array_unique(array_filter(
+            $urls,
+            static fn (string $url): bool => preg_match('#^https?://#i', $url) === 1
+        )));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function activityAddressedActorIds(array $activity): array
+    {
+        $ids = [];
+        $collect = static function (mixed $value) use (&$ids): void {
+            if (is_string($value)) {
+                $ids[] = $value;
+                return;
+            }
+            if (!is_array($value)) return;
+            $items = array_is_list($value) ? $value : [$value];
+            foreach ($items as $item) {
+                if (is_string($item)) {
+                    $ids[] = $item;
+                } elseif (is_array($item) && is_string($item['id'] ?? null)) {
+                    $ids[] = $item['id'];
+                }
+            }
+        };
+
+        foreach (['to', 'cc', 'bto', 'bcc', 'audience'] as $field) {
+            $collect($activity[$field] ?? null);
+        }
+
+        $obj = $activity['object'] ?? null;
+        if (is_array($obj)) {
+            foreach (['to', 'cc', 'bto', 'bcc', 'audience'] as $field) {
+                $collect($obj[$field] ?? null);
+            }
+            foreach (self::apList($obj['tag'] ?? []) as $tag) {
+                if (!is_array($tag)) continue;
+                $type = (string)($tag['type'] ?? '');
+                if ($type !== 'Mention') continue;
+                $href = trim((string)($tag['href'] ?? ($tag['id'] ?? '')));
+                if ($href !== '') $ids[] = $href;
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private static function forwardedObjectMatchesOrigin(array $received, array $origin): bool
+    {
+        foreach (['content', 'summary', 'published', 'updated', 'inReplyTo'] as $field) {
+            if (array_key_exists($field, $received)
+                && array_key_exists($field, $origin)
+                && self::apStr($received[$field] ?? '') !== self::apStr($origin[$field] ?? '')) {
+                return false;
+            }
+        }
+
+        $receivedContentMap = $received['contentMap'] ?? null;
+        $originContentMap = $origin['contentMap'] ?? null;
+        if (is_array($receivedContentMap) && is_array($originContentMap)
+            && json_encode($receivedContentMap) !== json_encode($originContentMap)) {
+            return false;
+        }
+
+        return true;
+    }
+
     private static function findRemoteNotification(string $userId, string $fromAcctId, string $type, ?string $statusId = null): ?array
     {
         return DB::one(
@@ -117,13 +744,42 @@ class InboxProcessor
         DB::run('UPDATE statuses SET reply_count=? WHERE id=?', [$count, $statusId]);
     }
 
+    private static function processBatch(array $activities, array $headers, string $method, string $path, string $rawBody = '', array $requestMeta = []): bool
+    {
+        $acceptedAny = false;
+        $processedAny = false;
+
+        foreach ($activities as $item) {
+            if (!is_array($item) || array_is_list($item)) {
+                continue;
+            }
+            $processedAny = true;
+            if (self::process($item, $headers, $method, $path, $rawBody, $requestMeta)) {
+                $acceptedAny = true;
+            }
+        }
+
+        if (!$processedAny) {
+            self::log('', '', $activities, 'Activity batch has no processable activities', $headers, [
+                'request' => ['method' => $method, 'path' => $path],
+            ], $requestMeta);
+        }
+
+        return $acceptedAny;
+    }
+
     public static function process(array $activity, array $headers, string $method, string $path, string $rawBody = '', array $requestMeta = []): bool
     {
-        $type    = $activity['type'] ?? '';
+        if (array_is_list($activity)) {
+            return self::processBatch($activity, $headers, $method, $path, $rawBody, $requestMeta);
+        }
+
+        $type    = (string)($activity['type'] ?? '');
         $actorId = is_string($activity['actor'] ?? null)
-            ? $activity['actor']
-            : ($activity['actor']['id'] ?? '');
+            ? trim($activity['actor'])
+            : (is_string($activity['actor']['id'] ?? null) ? trim($activity['actor']['id']) : '');
         $requestMeta = self::normalizeRequestMeta($requestMeta, $method, $path, $headers);
+        $activityForDispatch = $activity;
 
         // ── 1. Domain block check ─────────────────────────────
         if ($actorId) {
@@ -137,14 +793,14 @@ class InboxProcessor
         // ── 2. HTTP Signature verification ───────────────────
         $sigError = '';
         $obj      = $activity['object'] ?? '';
-        $objId    = is_string($obj) ? $obj : ($obj['id'] ?? '');
+        $objId    = is_string($obj) ? trim($obj) : (is_array($obj) ? trim((string)($obj['id'] ?? '')) : '');
 
         // Account-level Delete: actor == object (tombstone). The deleted actor's key
         // endpoint returns 404, so normal verification always fails. This is the classic
         // ActivityPub tombstone problem — all major implementations accept these.
         // A forged account-Delete can only remove our cached copy of a remote actor,
         // which is harmless (data re-fetched on next contact).
-        $isAccountDelete = ($type === 'Delete' && $objId !== '' && $objId === $actorId);
+        $isAccountDelete = ($type === 'Delete' && $objId !== '' && self::sameActorIdentity($objId, $actorId));
 
         $hasHttpSignature = !empty($headers['signature']);
         $httpSigResult    = $hasHttpSignature
@@ -152,6 +808,8 @@ class InboxProcessor
             : ['ok' => false, 'error' => '', 'key_id' => '', 'actor_url' => '', 'algorithm' => '', 'headers' => ''];
         $httpSigOk        = (bool)$httpSigResult['ok'];
         $proofSigOk       = false;
+        $acceptedSigDebug = [];
+        $skipDispatchAfterLog = false;
 
         if ($hasHttpSignature) {
             if (!$httpSigOk) {
@@ -161,14 +819,59 @@ class InboxProcessor
                 } else {
                     $rsaSigResult = CryptoModel::verifyRsaSignature2017Detailed($activity, $actorId);
                     if ($rsaSigResult['ok']) {
-                    $proofSigOk = true;
-                    $sigError = '';
+                        $proofSigOk = true;
+                        $sigError = '';
                     } elseif (self::isLegacyGhostBodySignatureCompatible($activity, $actorId, (string)$type)) {
-                    $sigError = '';
+                        $sigError = '';
+                    } elseif (self::isRetryReplaySignatureFailure($requestMeta, $httpSigResult)) {
+                        $signedActor = trim((string)($httpSigResult['actor_url'] ?? ''));
+                        $originProof = self::verifyForwardedObjectByOriginFetch($activity, $actorId, $signedActor);
+                        if (!empty($originProof['ok'])) {
+                            if (is_array($originProof['_object'] ?? null)) {
+                                $activityForDispatch['object'] = $originProof['_object'];
+                            }
+                            $originProofDebug = self::originFetchProofDebug($originProof);
+                            $proofSigOk = true;
+                            $sigError = '';
+                            $acceptedSigDebug = [
+                                'request' => ['method' => $method, 'path' => $path],
+                                'http_signature' => $httpSigResult,
+                                'rsa_signature' => $rsaSigResult,
+                                'origin_fetch_proof' => $originProofDebug,
+                                'signed_actor' => $signedActor,
+                            ];
+                        } else {
+                            $originProofDebug = self::originFetchProofDebug($originProof);
+                            if (self::shouldSoftIgnoreUnverifiedForwardedActivity($activity, $actorId, $signedActor)) {
+                                $skipDispatchAfterLog = true;
+                                $sigError = '';
+                                $acceptedSigDebug = [
+                                    'request' => ['method' => $method, 'path' => $path],
+                                    'http_signature' => $httpSigResult,
+                                    'rsa_signature' => $rsaSigResult,
+                                    'origin_fetch_proof' => $originProofDebug,
+                                    'signed_actor' => $signedActor,
+                                    'forwarded_fallback' => [
+                                        'ok' => true,
+                                        'mode' => 'ignored_unverified_public_forward',
+                                        'reason' => 'not_targeted_at_local_instance',
+                                    ],
+                                ];
+                            } else {
+                                self::log($actorId, $type, $activity, 'HTTP Signature retry digest mismatch and origin fetch proof is invalid', $headers, [
+                                    'request' => ['method' => $method, 'path' => $path],
+                                    'http_signature' => $httpSigResult,
+                                    'rsa_signature' => $rsaSigResult,
+                                    'origin_fetch_proof' => $originProofDebug,
+                                    'signed_actor' => $signedActor,
+                                ], $requestMeta);
+                                return false;
+                            }
+                        }
                     } elseif ($isAccountDelete) {
-                    // Verification failed because the actor is gone — accept anyway.
-                    // Log without error so it doesn't flood the error list.
-                    $sigError = '';
+                        // Verification failed because the actor is gone — accept anyway.
+                        // Log without error so it doesn't flood the error list.
+                        $sigError = '';
                     } elseif ($type === 'Delete' && !CryptoModel::fetchPublicKey($actorId)) {
                     // Post-Delete from an actor whose key can no longer be fetched
                     // (account deleted on their server). Mastodon sends individual post
@@ -222,35 +925,124 @@ class InboxProcessor
             }
         }
 
-        // Mastodon's FeatureRequest activities do not include an explicit `actor`.
-        // After signature verification, promote the verified signer actor so later
-        // routing/dispatch logic can still resolve the remote account correctly.
-        if ($actorId === '' && $httpSigOk) {
-            $derivedActor = trim((string)($httpSigResult['actor_url'] ?? ''));
-            if ($derivedActor !== '') {
-                $actorId = $derivedActor;
+        if ($httpSigOk) {
+            $signedActor = trim((string)($httpSigResult['actor_url'] ?? ''));
+            if ($actorId === '') {
+                if ($signedActor !== '' && self::canDeriveMissingActorFromSignature((string)$type)) {
+                    // Mastodon's FeatureRequest activities omit `actor`; only this
+                    // activity type may promote the verified signer into actorId.
+                    $actorId = $signedActor;
+                } else {
+                    self::log($actorId, $type, $activity, 'HTTP Signature verified but activity actor is missing', $headers, [
+                        'request' => ['method' => $method, 'path' => $path],
+                        'http_signature' => $httpSigResult,
+                    ], $requestMeta);
+                    return false;
+                }
+            } elseif ($signedActor !== '' && !self::sameActorIdentity($actorId, $signedActor)) {
+                $actorProof = self::verifyActivityActorProof($activity, $actorId);
+                if (empty($actorProof['ok'])) {
+                    $originProof = self::verifyForwardedObjectByOriginFetch($activity, $actorId, $signedActor);
+                    if (!empty($originProof['ok'])) {
+                        if (is_array($originProof['_object'] ?? null)) {
+                            $activityForDispatch['object'] = $originProof['_object'];
+                        }
+                        $originProofDebug = self::originFetchProofDebug($originProof);
+                        $proofSigOk = true;
+                        $acceptedSigDebug = [
+                            'request' => ['method' => $method, 'path' => $path],
+                            'http_signature' => $httpSigResult,
+                            'activity_actor_proof' => $actorProof,
+                            'origin_fetch_proof' => $originProofDebug,
+                            'signed_actor' => $signedActor,
+                        ];
+                    } else {
+                        $originProofDebug = self::originFetchProofDebug($originProof);
+                        if (self::shouldSoftIgnoreUnverifiedForwardedActivity($activity, $actorId, $signedActor)) {
+                            $skipDispatchAfterLog = true;
+                            $acceptedSigDebug = [
+                                'request' => ['method' => $method, 'path' => $path],
+                                'http_signature' => $httpSigResult,
+                                'activity_actor_proof' => $actorProof,
+                                'origin_fetch_proof' => $originProofDebug,
+                                'signed_actor' => $signedActor,
+                                'forwarded_fallback' => [
+                                    'ok' => true,
+                                    'mode' => 'ignored_unverified_public_forward',
+                                    'reason' => 'not_targeted_at_local_instance',
+                                ],
+                            ];
+                        } else {
+                            self::log($actorId, $type, $activity, 'HTTP Signature signer does not match activity actor and activity actor proof is invalid', $headers, [
+                                'request' => ['method' => $method, 'path' => $path],
+                                'http_signature' => $httpSigResult,
+                                'activity_actor_proof' => $actorProof,
+                                'origin_fetch_proof' => $originProofDebug,
+                                'signed_actor' => $signedActor,
+                            ], $requestMeta);
+                            return false;
+                        }
+                    }
+                }
+
+                if (empty($acceptedSigDebug)) {
+                    $proofSigOk = true;
+                    $acceptedSigDebug = [
+                        'request' => ['method' => $method, 'path' => $path],
+                        'http_signature' => $httpSigResult,
+                        'activity_actor_proof' => $actorProof,
+                        'signed_actor' => $signedActor,
+                    ];
+                }
+            }
+        }
+
+        if ($actorId === '') {
+            self::log($actorId, $type, $activity, 'Activity actor is missing after signature verification', $headers, [
+                'request' => ['method' => $method, 'path' => $path],
+                'http_signature' => $httpSigResult,
+            ], $requestMeta);
+            return false;
+        }
+
+        if ($actorId) {
+            $domain = parse_url($actorId, PHP_URL_HOST) ?? '';
+            if ($domain && is_domain_blocked($domain)) {
+                return false;
             }
         }
 
         // ── 3. Log ────────────────────────────────────────────
-        self::log($actorId, $type, $activity, $sigError, $headers, [], $requestMeta);
+        self::log(
+            $actorId,
+            $type,
+            $activity,
+            $sigError,
+            $headers,
+            $acceptedSigDebug,
+            $requestMeta,
+            $skipDispatchAfterLog ? 'ignored' : ''
+        );
+        if ($skipDispatchAfterLog) {
+            return true;
+        }
 
         // ── 4. Ensure actor is cached ────────────────────────
         if ($actorId) RemoteActorModel::fetch($actorId);
 
         // ── 5. Dispatch ───────────────────────────────────────
         return match ($type) {
-            'Create'   => self::onCreate($activity, $actorId),
-            'Update'   => self::onUpdate($activity, $actorId),
-            'Delete'   => self::onDelete($activity, $actorId),
-            'Follow'   => self::onFollow($activity, $actorId),
-            'FeatureRequest' => self::onFeatureRequest($activity, $actorId),
-            'Undo'     => self::onUndo($activity, $actorId),
-            'Accept'   => self::onAccept($activity, $actorId),
-            'Reject'   => self::onReject($activity, $actorId),
-            'Like'     => self::onLike($activity, $actorId),
-            'Announce' => self::onAnnounce($activity, $actorId),
-            'Move'     => self::onMove($activity, $actorId),
+            'Create'   => self::onCreate($activityForDispatch, $actorId),
+            'Update'   => self::onUpdate($activityForDispatch, $actorId),
+            'Delete'   => self::onDelete($activityForDispatch, $actorId),
+            'Follow'   => self::onFollow($activityForDispatch, $actorId),
+            'FeatureRequest' => self::onFeatureRequest($activityForDispatch, $actorId),
+            'Undo'     => self::onUndo($activityForDispatch, $actorId),
+            'Accept'   => self::onAccept($activityForDispatch, $actorId),
+            'Reject'   => self::onReject($activityForDispatch, $actorId),
+            'Like'     => self::onLike($activityForDispatch, $actorId),
+            'Announce' => self::onAnnounce($activityForDispatch, $actorId),
+            'Move'     => self::onMove($activityForDispatch, $actorId),
             default    => true,
         };
     }
@@ -322,7 +1114,8 @@ class InboxProcessor
 
             DB::update('statuses', [
                 'content'    => $newContent !== '' ? $newContent : $existing['content'],
-                'cw'         => self::apStr($obj['summary'] ?? '', $existing['cw']),
+                'title'      => self::apExtractTitle($obj) ?: (string)($existing['title'] ?? ''),
+                'cw'         => self::apExtractContentWarning($obj, (string)($existing['cw'] ?? '')),
                 'visibility' => self::apVisibility($obj['to'] ?? [], $obj['cc'] ?? []),
                 'language'   => is_array($obj['contentMap'] ?? null)
                                     ? (array_key_first((array)$obj['contentMap']) ?? ($existing['language'] ?? 'en'))
@@ -482,6 +1275,16 @@ class InboxProcessor
             }
         }
 
+        // Replies to a local post should notify the local author even if the remote
+        // server omitted an explicit Mention tag for them.
+        if ($replyToUid && !in_array($replyToUid, $seenMentionIds, true)) {
+            $replyTarget = UserModel::byId($replyToUid);
+            if ($replyTarget && (string)($replyTarget['id'] ?? '') !== $actorId) {
+                $localMentionTargets[] = $replyTarget;
+                $seenMentionIds[] = $replyTarget['id'];
+            }
+        }
+
         // Resolve quote_of_id from quoteUri (FEP-e232 / fedibird / Misskey extension)
         $quoteOfId = null;
         $quoteUri  = $obj['quoteUri'] ?? $obj['quoteUrl'] ?? $obj['_misskey_quote'] ?? null;
@@ -502,8 +1305,9 @@ class InboxProcessor
             'reply_to_uid'=> $replyToUid,
             'reblog_of_id'=> null,
             'quote_of_id' => $quoteOfId,
+            'title'       => self::apExtractTitle($obj),
             'content'     => self::apExtractContent($obj),
-            'cw'          => self::apStr($obj['summary'] ?? ''),
+            'cw'          => self::apExtractContentWarning($obj),
             'visibility'  => self::apVisibility($obj['to'] ?? [], $obj['cc'] ?? []),
             'language'    => is_array($obj['contentMap'] ?? null)
                                 ? (array_key_first((array)$obj['contentMap']) ?? 'en')
@@ -683,7 +1487,7 @@ class InboxProcessor
             if ($attributedActorIds !== []) {
                 $ownsExisting = false;
                 foreach ($attributedActorIds as $attributedActorId) {
-                    if (rtrim($attributedActorId, '/') === rtrim((string)($existing['user_id'] ?? ''), '/')) {
+                    if (self::sameActorIdentity($attributedActorId, (string)($existing['user_id'] ?? ''))) {
                         $ownsExisting = true;
                         break;
                     }
@@ -719,7 +1523,8 @@ class InboxProcessor
 
             DB::update('statuses', [
                 'content'    => self::apExtractContent($data) ?: $existing['content'],
-                'cw'         => self::apStr($data['summary'] ?? '', $existing['cw']),
+                'title'      => self::apExtractTitle($data) ?: (string)($existing['title'] ?? ''),
+                'cw'         => self::apExtractContentWarning($data, (string)($existing['cw'] ?? '')),
                 'visibility' => self::apVisibility($data['to'] ?? [], $data['cc'] ?? []),
                 'language'   => is_array($data['contentMap'] ?? null)
                                     ? (array_key_first((array)$data['contentMap']) ?? ($existing['language'] ?? 'en'))
@@ -838,8 +1643,9 @@ class InboxProcessor
             'reply_to_uid'    => $replyToUid,
             'reblog_of_id'    => null,
             'quote_of_id'     => null,
+            'title'           => self::apExtractTitle($data),
             'content'         => self::apExtractContent($data),
-            'cw'              => self::apStr($data['summary'] ?? ''),
+            'cw'              => self::apExtractContentWarning($data),
             'visibility'      => self::apVisibility($data['to'] ?? [], $data['cc'] ?? []),
             'language'        => is_array($data['contentMap'] ?? null)
                                     ? (array_key_first((array)$data['contentMap']) ?? 'en')
@@ -1041,7 +1847,7 @@ class InboxProcessor
             $existing = StatusModel::byUri($uri);
             if (!$existing) return true; // not cached locally, ignore
             if ((int)($existing['local'] ?? 0) === 1) return true;
-            if ((string)($existing['user_id'] ?? '') !== $actorId) {
+            if (!self::sameActorIdentity((string)($existing['user_id'] ?? ''), $actorId)) {
                 self::log($actorId, 'Update-rejected', $a, 'actor does not own cached status');
                 return false;
             }
@@ -1065,7 +1871,8 @@ class InboxProcessor
 
             DB::update('statuses', [
                 'content'    => $newContent !== '' ? $newContent : $existing['content'],
-                'cw'         => self::apStr($obj['summary'] ?? '', $existing['cw']),
+                'title'      => self::apExtractTitle($obj) ?: (string)($existing['title'] ?? ''),
+                'cw'         => self::apExtractContentWarning($obj, (string)($existing['cw'] ?? '')),
                 'language'   => is_array($obj['contentMap'] ?? null)
                                     ? (array_key_first((array)$obj['contentMap']) ?? ($existing['language'] ?? 'en'))
                                     : self::apStr($obj['language'] ?? ($existing['language'] ?? 'en'), $existing['language'] ?? 'en'),
@@ -1151,12 +1958,12 @@ class InboxProcessor
 
         // Can only delete content attributed to the actor
         $s = StatusModel::byUri($uri);
-        if ($s && $s['user_id'] === $actorId) {
+        if ($s && self::sameActorIdentity((string)($s['user_id'] ?? ''), $actorId)) {
             StatusModel::deleteRemote($s['id']); // handles cascade (reblogs, pins, etc)
         }
 
         // Actor self-delete (tombstone)
-        if ($uri === $actorId) {
+        if (self::sameActorIdentity($uri, $actorId)) {
             $theirStatuses = DB::all('SELECT id FROM statuses WHERE user_id=?', [$actorId]);
             foreach ($theirStatuses as $row) {
                 StatusModel::deleteRemote($row['id']);
@@ -1590,8 +2397,9 @@ class InboxProcessor
                         'reply_to_uid'=> $replyToUid,
                         'reblog_of_id'=> null,
                         'quote_of_id' => null,
+                        'title'       => self::apExtractTitle($data),
                         'content'     => self::apExtractContent($data),
-                        'cw'          => self::apStr($data['summary'] ?? ''),
+                        'cw'          => self::apExtractContentWarning($data),
                         'visibility'  => self::apVisibility($data['to'] ?? [], $data['cc'] ?? []),
                         'language'    => is_array($data['contentMap'] ?? null)
                                             ? (array_key_first((array)$data['contentMap']) ?? 'en')
@@ -1721,7 +2529,7 @@ class InboxProcessor
         $newUrl = is_string($a['target'] ?? null) ? $a['target'] : ($a['target']['id'] ?? '');
 
         if (!$oldUrl || !$newUrl || $oldUrl === $newUrl) return false;
-        if ($oldUrl !== $actorId) return false;
+        if (!self::sameActorIdentity($oldUrl, $actorId)) return false;
 
         $newActor = RemoteActorModel::fetch($newUrl, true);
         if (!$newActor) return false;
@@ -1834,6 +2642,43 @@ class InboxProcessor
         return self::apStr($obj['name'] ?? '');
     }
 
+    private static function apExtractTitle(array $obj): string
+    {
+        $type = (string)($obj['type'] ?? '');
+        if (!in_array($type, ['Article', 'Page', 'Video', 'Audio', 'Event'], true)) {
+            return '';
+        }
+
+        $title = trim(strip_tags(html_entity_decode(self::apStr($obj['name'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        if ($title === '') return '';
+
+        $content = trim(strip_tags(html_entity_decode(self::apStr($obj['content'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        if ($content === '' && is_array($obj['contentMap'] ?? null)) {
+            foreach ($obj['contentMap'] as $text) {
+                if (!is_string($text) || trim($text) === '') continue;
+                $content = trim(strip_tags(html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                break;
+            }
+        }
+        if ($content === '') return '';
+        if (mb_strtolower($content, 'UTF-8') === mb_strtolower($title, 'UTF-8')) return '';
+
+        return mb_substr($title, 0, 500, 'UTF-8');
+    }
+
+    private static function apExtractContentWarning(array $obj, string $default = ''): string
+    {
+        $summary = self::apStr($obj['summary'] ?? '', $default);
+        if ($summary === '') return '';
+
+        $type = (string)($obj['type'] ?? '');
+        if (in_array($type, ['Article', 'Page', 'Video', 'Audio', 'Event'], true) && empty($obj['sensitive'])) {
+            return '';
+        }
+
+        return $summary;
+    }
+
     /**
      * Normalise inbound AP timestamps to canonical UTC with millisecond suffix.
      * This keeps text-based SQLite ordering stable across timezones and malformed inputs.
@@ -1869,7 +2714,7 @@ class InboxProcessor
         if ($actorId === '' || !array_key_exists('attributedTo', $obj)) return true;
 
         foreach (self::objectAttributedActorIds($obj) as $id) {
-            if (rtrim($id, '/') === rtrim($actorId, '/')) {
+            if (self::sameActorIdentity($id, $actorId)) {
                 return true;
             }
         }
@@ -2002,10 +2847,13 @@ class InboxProcessor
         ];
     }
 
-    private static function log(string $actor, string $type, array $activity, string $error = '', array $headers = [], array $sigDebug = [], array $requestMeta = []): void
+    private static function log(string $actor, string $type, array $activity, string $error = '', array $headers = [], array $sigDebug = [], array $requestMeta = [], string $disposition = ''): void
     {
         try {
             $requestMeta = self::normalizeRequestMeta($requestMeta, 'POST', '/inbox', $headers);
+            $disposition = in_array($disposition, ['accepted', 'rejected', 'ignored'], true)
+                ? $disposition
+                : ($error !== '' ? 'rejected' : 'accepted');
             $sigHeaders = [];
             foreach (['signature', 'signature-input', 'digest', 'content-digest', 'date', 'host', 'user-agent', 'content-type'] as $name) {
                 $value = trim((string)($headers[$name] ?? ''));
@@ -2029,6 +2877,7 @@ class InboxProcessor
                 'request_path' => $requestMeta['path'],
                 'request_host' => $requestMeta['host'],
                 'remote_ip'  => $requestMeta['remote_ip'],
+                'disposition' => $disposition,
                 'created_at' => now_iso(),
             ]);
         } catch (\Throwable) { /* non-fatal */ }

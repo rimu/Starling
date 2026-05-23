@@ -445,7 +445,7 @@ class RemoteActorModel
                 CURLOPT_SSL_VERIFYPEER => true,
                 CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_HTTPHEADER     => $buildHeaders($currentUrl),
-            ]);
+            ] + self::safeCurlResolveOptions($currentUrl));
             $response = curl_exec($ch);
             $errno    = curl_errno($ch);
             $err      = curl_error($ch);
@@ -523,6 +523,45 @@ class RemoteActorModel
         }
 
         return true;
+    }
+
+    public static function safeCurlResolveOptions(string $url): array
+    {
+        $parsed = parse_url($url);
+        $host = (string)($parsed['host'] ?? '');
+        if ($host === '' || filter_var($host, FILTER_VALIDATE_IP)) {
+            return [];
+        }
+
+        $scheme = strtolower((string)($parsed['scheme'] ?? 'https'));
+        $port = (int)($parsed['port'] ?? ($scheme === 'http' ? 80 : 443));
+        if ($port <= 0 || $port > 65535) {
+            return [];
+        }
+
+        $ips = self::resolveHostIps($host);
+        if (!$ips) {
+            return [];
+        }
+        foreach ($ips as $ip) {
+            if (!self::isPublicIp($ip)) {
+                return [];
+            }
+        }
+
+        $selected = '';
+        foreach ($ips as $ip) {
+            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                $selected = $ip;
+                break;
+            }
+        }
+        if ($selected === '') {
+            $selected = $ips[0];
+        }
+
+        $address = filter_var($selected, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) ? '[' . $selected . ']' : $selected;
+        return [CURLOPT_RESOLVE => [$host . ':' . $port . ':' . $address]];
     }
 
     /**

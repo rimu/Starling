@@ -548,7 +548,7 @@ class Delivery
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
             CURLOPT_HTTPHEADER     => $headerLines,
-        ]);
+        ] + RemoteActorModel::safeCurlResolveOptions($inboxUrl));
         curl_exec($ch);
         $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
         self::closeCurlHandle($ch);
@@ -885,6 +885,7 @@ class Delivery
                 foreach ($hdrs as $k => $v) $headerLines[] = "$k: $v";
 
                 $ch = curl_init($row['inbox_url']);
+                $inboxUrl = (string)$row['inbox_url'];
                 $rowId = (string)$row['id'];
                 $responseHeadersMap[$rowId] = [];
                 curl_setopt_array($ch, [
@@ -905,7 +906,7 @@ class Delivery
                         $responseHeadersMap[$rowId][strtolower(trim($name))] = trim($value);
                         return strlen($headerLine);
                     },
-                ]);
+                ] + RemoteActorModel::safeCurlResolveOptions($inboxUrl));
 
                 curl_multi_add_handle($mh, $ch);
                 $handles[$rowId] = ['ch' => $ch, 'row' => $row, 'activity' => $activity];

@@ -300,7 +300,7 @@ class UserModel
                 CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_USERAGENT      => AP_SOFTWARE . '/' . AP_VERSION . ' (+https://' . AP_DOMAIN . ')',
                 CURLOPT_HTTPHEADER     => ['Accept: text/html'],
-            ]);
+            ] + RemoteActorModel::safeCurlResolveOptions($currentUrl));
             $response = curl_exec($ch);
             $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
             $lastCode = $code;
@@ -483,6 +483,7 @@ class UserModel
                 'privacy'               => $prefs['posting:default:visibility'] ?? 'public',
                 'sensitive'             => (bool)($prefs['posting:default:sensitive'] ?? false),
                 'language'              => $prefs['posting:default:language'] ?? 'pt',
+                'quote_policy'          => \App\Models\StatusModel::normalizeQuotePolicy($prefs['posting:default:quote_policy'] ?? 'public'),
                 'note'                  => $u['bio'] ?? '',
                 'fields'                => self::parseFieldsRaw($u['fields'] ?? '[]'),
                 'follow_requests_count' => DB::count('follows', 'following_id=? AND pending=1', [$u['id']]),

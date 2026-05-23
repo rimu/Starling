@@ -587,6 +587,7 @@ class AdminCtrl
         $description = trim((string)($_POST['description'] ?? ''));
         $sourceUrl = rtrim(trim((string)($_POST['source_url'] ?? '')), '/');
         $atprotoDid = trim((string)($_POST['atproto_did'] ?? ''));
+        $trustedProxyRaw = trim((string)($_POST['trusted_proxies'] ?? ''));
         $oauthTokenTtlDays = max(0, min(3650, (int)($_POST['oauth_token_ttl_days'] ?? 0)));
         $homeTimelineMaxItems = max(1, min(10000, (int)($_POST['home_timeline_max_items'] ?? 800)));
         $listTimelineMaxItems = max(1, min(10000, (int)($_POST['list_timeline_max_items'] ?? 800)));
@@ -616,6 +617,26 @@ class AdminCtrl
             $this->flash('error', 'Source URL must be a valid URL.');
             $this->redirect('/admin/settings');
         }
+        $trustedProxies = [];
+        foreach (preg_split('/[\s,]+/', $trustedProxyRaw) ?: [] as $proxy) {
+            $proxy = trim((string)$proxy);
+            if ($proxy === '') continue;
+            $valid = false;
+            if (str_contains($proxy, '/')) {
+                [$ip, $bitsRaw] = array_pad(explode('/', $proxy, 2), 2, '');
+                $packed = @inet_pton(trim($ip));
+                $maxBits = $packed === false ? 0 : strlen($packed) * 8;
+                $valid = $packed !== false && ctype_digit($bitsRaw) && (int)$bitsRaw >= 0 && (int)$bitsRaw <= $maxBits;
+            } else {
+                $valid = (bool)filter_var($proxy, FILTER_VALIDATE_IP);
+            }
+            if (!$valid) {
+                $this->flash('error', 'Trusted proxies must be IP addresses or CIDR ranges.');
+                $this->redirect('/admin/settings');
+            }
+            $trustedProxies[] = $proxy;
+        }
+        $trustedProxies = array_values(array_unique($trustedProxies));
 
         $current = $this->readGeneratedConfig();
         $current['installed'] = true;
@@ -634,6 +655,7 @@ class AdminCtrl
         $current['software'] = $current['software'] ?? AP_SOFTWARE;
         $current['source_url'] = $sourceUrl !== '' ? $sourceUrl : $baseUrl;
         $current['atproto_did'] = $atprotoDid;
+        $current['trusted_proxies'] = $trustedProxies;
         $current['oauth_token_ttl_days'] = $oauthTokenTtlDays;
         $current['home_timeline_max_items'] = $homeTimelineMaxItems;
         $current['list_timeline_max_items'] = $listTimelineMaxItems;
@@ -646,7 +668,7 @@ class AdminCtrl
             'instance',
             AP_DOMAIN,
             'Updated instance settings.',
-            ['site_name' => $siteName, 'base_url' => $baseUrl, 'admin_email' => strtolower($adminEmail), 'open_reg' => $openReg, 'oauth_token_ttl_days' => $oauthTokenTtlDays, 'home_timeline_max_items' => $homeTimelineMaxItems, 'list_timeline_max_items' => $listTimelineMaxItems]
+            ['site_name' => $siteName, 'base_url' => $baseUrl, 'admin_email' => strtolower($adminEmail), 'open_reg' => $openReg, 'trusted_proxies' => $trustedProxies, 'oauth_token_ttl_days' => $oauthTokenTtlDays, 'home_timeline_max_items' => $homeTimelineMaxItems, 'list_timeline_max_items' => $listTimelineMaxItems]
         );
         $this->flash('success', 'Instance settings saved. Reload the app to see all changes reflected everywhere.');
         $this->redirect('/admin/settings');
@@ -659,9 +681,13 @@ class AdminCtrl
         $this->requireAuth();
         $page   = max(1, (int)($_GET['page'] ?? 1));
         $type   = $_GET['type'] ?? '';
+        $status = (string)($_GET['status'] ?? ($_GET['disposition'] ?? 'all'));
+        if (!in_array($status, ['all', 'accepted', 'ignored', 'rejected'], true)) {
+            $status = 'all';
+        }
         $errors = !empty($_GET['errors']);
-        $data   = AdminModel::inboxLog($page, $type, $errors);
-        $this->html($this->layout('Inbox Log', $this->inboxLogContent($data, $type, $errors)));
+        $data   = AdminModel::inboxLog($page, $type, $status, $errors);
+        $this->html($this->layout('Inbox Log', $this->inboxLogContent($data, $type, $status, $errors)));
     }
 
     public function inboxLogDetail(array $p): void
@@ -682,11 +708,15 @@ class AdminCtrl
             $this->flash('error', 'Retry failed: ' . htmlspecialchars((string)($result['error'] ?? 'unknown_error'), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
             $this->redirect('/admin/inbox-log/' . rawurlencode($id));
         }
-        $msg = !empty($result['accepted'])
-            ? 'Inbox entry reprocessed and accepted. A new inbox log entry was created.'
-            : 'Inbox entry reprocessed and rejected again. A new inbox log entry was created.';
+        $newDisposition = (string)($result['new_disposition'] ?? '');
+        $msg = match ($newDisposition) {
+            'accepted' => 'Inbox entry reprocessed and accepted. A new inbox log entry was created.',
+            'ignored' => 'Inbox entry reprocessed and classified as ignored. A new inbox log entry was created.',
+            default => 'Inbox entry reprocessed and rejected again. A new inbox log entry was created.',
+        };
         $this->flash('success', $msg);
-        $this->redirect('/admin/inbox-log/' . rawurlencode($id));
+        $targetId = trim((string)($result['new_log_id'] ?? ''));
+        $this->redirect('/admin/inbox-log/' . rawurlencode($targetId !== '' ? $targetId : $id));
     }
 
     // ── Maintenance ───────────────────────────────────────────
@@ -1040,7 +1070,7 @@ class AdminCtrl
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');
         header('X-Robots-Tag: noindex, nofollow');
-        header("Content-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self';");
+        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none';");
         echo $content;
         exit;
     }
@@ -2049,6 +2079,7 @@ HTML;
         $description = $generated['description'] ?? AP_DESCRIPTION;
         $sourceUrl = $generated['source_url'] ?? AP_SOURCE_URL;
         $atprotoDid = $generated['atproto_did'] ?? AP_ATPROTO_DID;
+        $trustedProxyValue = implode("\n", array_map('strval', (array)($generated['trusted_proxies'] ?? [])));
         $oauthTokenTtlDays = (int)($generated['oauth_token_ttl_days'] ?? oauth_token_ttl_days());
         $homeTimelineMaxItems = (int)($generated['home_timeline_max_items'] ?? (defined('AP_HOME_TIMELINE_MAX_ITEMS') ? AP_HOME_TIMELINE_MAX_ITEMS : 800));
         $listTimelineMaxItems = (int)($generated['list_timeline_max_items'] ?? (defined('AP_LIST_TIMELINE_MAX_ITEMS') ? AP_LIST_TIMELINE_MAX_ITEMS : 800));
@@ -2129,6 +2160,10 @@ HTML;
       <label>AT Protocol DID</label>
       <input type="text" name="atproto_did" value="{$e($atprotoDid)}" placeholder="did:plc:...">
     </div>
+    <div class="form-group" style="flex:1 1 100%">
+      <label>Trusted proxy IPs/CIDRs</label>
+      <textarea name="trusted_proxies" rows="3" style="width:100%;padding:.75rem .9rem;background:var(--bg2);border:1px solid var(--border);border-radius:12px;color:var(--text);font:inherit;resize:vertical" placeholder="127.0.0.1&#10;10.0.0.0/8">{$e($trustedProxyValue)}</textarea>
+    </div>
     <div class="form-group" style="min-width:220px">
       <label>OAuth token max age (days)</label>
       <input type="number" min="0" max="3650" name="oauth_token_ttl_days" value="{$e($oauthTokenTtlDays)}" placeholder="0">
@@ -2159,6 +2194,7 @@ HTML;
   <div class="card" style="max-width:860px">
     <div class="card-sub">These settings are stored in <code>storage/config.generated.php</code>. Changing the base URL or domain after federation has already started can break identifiers and remote references, so do that only with care.</div>
     <div class="card-sub" style="margin-top:.55rem">OAuth token max age is disabled when set to <code>0</code>. When enabled, tokens are revoked lazily on their next authenticated use.</div>
+    <div class="card-sub" style="margin-top:.55rem">Forwarded headers such as <code>X-Forwarded-For</code> are trusted only when the direct peer is loopback/private or matches the trusted proxy list.</div>
     <div class="card-sub" style="margin-top:.55rem">Home timeline window limits the total number of most-recent eligible posts exposed by <code>/api/v1/timelines/home</code> before normal pagination is applied. Older posts fall out of the visible window, similar to Mastodon&apos;s bounded home feed behavior.</div>
     <div class="card-sub" style="margin-top:.55rem">List timeline window does the same for <code>/api/v1/timelines/list/:id</code>, so old list posts also fall out of the visible window instead of remaining infinitely pageable.</div>
   </div>
@@ -2168,13 +2204,17 @@ HTML;
 
     // ── Inbox log content ─────────────────────────────────────
 
-    private function inboxLogContent(array $data, string $type, bool $errors): string
+    private function inboxLogContent(array $data, string $type, string $status, bool $errors): string
     {
         $e    = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $rows = '';
         foreach ($data['rows'] as $r) {
-            $hasErr  = $r['error'] !== '';
-            $errBadge= $hasErr ? "<span class='badge badge-red'>error</span>" : "<span class='badge badge-green'>ok</span>";
+            $disposition = $this->inboxDisposition($r);
+            $errBadge = match ($disposition) {
+                'rejected' => "<span class='badge badge-red'>rejected</span>",
+                'ignored'  => "<span class='badge badge-amber'>ignored</span>",
+                default    => "<span class='badge badge-green'>accepted</span>",
+            };
             $requestLine = trim((string)($r['request_method'] ?? '')) !== ''
                 ? $e(trim((string)$r['request_method']) . ' ' . trim((string)($r['request_path'] ?? '')))
                 : '—';
@@ -2195,8 +2235,18 @@ HTML;
             $sel      = $type === $t ? ' selected' : '';
             $typeOpts .= "<option value='{$e($t)}'{$sel}>{$e($t)}</option>";
         }
+        $statusOpts = '';
+        foreach (['all' => 'All statuses', 'accepted' => 'Accepted', 'ignored' => 'Ignored', 'rejected' => 'Rejected'] as $value => $label) {
+            $sel = $status === $value ? ' selected' : '';
+            $statusOpts .= "<option value='{$e($value)}'{$sel}>{$e($label)}</option>";
+        }
         $errChecked = $errors ? ' checked' : '';
-        $pager = $this->paginator($data['page'], $data['pages'], "/admin/inbox-log?type=" . urlencode($type) . ($errors ? '&errors=1' : ''));
+        $pagerParams = [];
+        if ($type !== '') $pagerParams['type'] = $type;
+        if ($status !== 'all') $pagerParams['status'] = $status;
+        if ($errors) $pagerParams['errors'] = '1';
+        $pagerBase = '/admin/inbox-log' . ($pagerParams ? '?' . http_build_query($pagerParams) : '');
+        $pager = $this->paginator($data['page'], $data['pages'], $pagerBase);
 
         return <<<HTML
 <div class="form-row">
@@ -2206,9 +2256,13 @@ HTML;
       <select name="type">{$typeOpts}</select>
     </div>
     <div class="form-group">
+      <label>Status</label>
+      <select name="status">{$statusOpts}</select>
+    </div>
+    <div class="form-group">
       <label>&nbsp;</label>
       <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;text-transform:none;letter-spacing:0">
-        <input type="checkbox" name="errors" value="1"{$errChecked}> Errors only
+        <input type="checkbox" name="errors" value="1"{$errChecked}> Has error
       </label>
     </div>
     <div class="form-group"><label>&nbsp;</label><button class="btn btn-ghost" type="submit">Filter</button></div>
@@ -2228,6 +2282,7 @@ HTML;
     private function inboxDetailContent(array $r): string
     {
         $e    = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $disposition = $this->inboxDisposition($r);
         $json = json_encode(json_decode($r['raw_json']), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $sigHeaders = json_decode((string)($r['sig_headers'] ?? '{}'), true);
         $sigDebug = json_decode((string)($r['sig_debug'] ?? '{}'), true);
@@ -2251,7 +2306,15 @@ HTML;
         }
         $requestSummary = $requestParts ? implode(' · ', array_filter($requestParts)) : '—';
         $actorUrl = trim((string)($r['actor_url'] ?? ''));
-        $errHtml = $r['error'] ? "<div class='flash flash-error' style='margin-bottom:1rem'><strong>Error:</strong> {$e($r['error'])}</div>" : '';
+        $errHtml = '';
+        if ($disposition === 'rejected' && $r['error']) {
+            $errHtml = "<div class='flash flash-error' style='margin-bottom:1rem'><strong>Error:</strong> {$e($r['error'])}</div>";
+        } elseif ($disposition === 'ignored') {
+            $note = $r['error']
+                ? 'Ignored as non-actionable federation noise: ' . $r['error']
+                : 'Ignored as non-actionable federation noise.';
+            $errHtml = "<div class='flash' style='margin-bottom:1rem;background:var(--amber-bg);border-color:var(--amber2);color:var(--amber2)'><strong>Ignored:</strong> {$e($note)}</div>";
+        }
         $sigHtml = $sigJson !== '' ? "<div class=\"section-title\">Signature headers</div>\n<pre class=\"code\">{$e($sigJson)}</pre>" : '';
         $sigDebugHtml = $sigDebugJson !== '' ? "<div class=\"section-title\">Signature debug</div>\n<pre class=\"code\">{$e($sigDebugJson)}</pre>" : '';
         $retryForm = "<form method=\"POST\" action=\"/admin/inbox-log/{$e($r['id'])}/retry\" style=\"display:inline-flex\"><button class=\"btn btn-primary btn-sm\" type=\"submit\">Retry verification</button></form>";
@@ -2262,8 +2325,9 @@ HTML;
         return <<<HTML
 <div style="margin-bottom:1rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center"><a href="/admin/inbox-log" class="btn btn-ghost btn-sm">← Back</a>{$retryForm}{$refetchForm}</div>
 {$errHtml}
-<div class="cards" style="grid-template-columns:repeat(3,auto) 1fr;gap:.6rem;margin-bottom:1.5rem">
+<div class="cards" style="grid-template-columns:repeat(4,auto) 1fr;gap:.6rem;margin-bottom:1.5rem">
   <div class="card"><div class="card-label">Type</div><div style="color:var(--blue);font-weight:600">{$e($r['type'])}</div></div>
+  <div class="card"><div class="card-label">Status</div><div style="font-weight:600">{$e($disposition)}</div></div>
   <div class="card"><div class="card-label">Date</div><div class="card-value" style="font-size:.9rem">{$e($this->fmtDateTime($r['created_at'] ?? ''))}</div></div>
   <div class="card"><div class="card-label">Actor</div><div class="card-value" style="font-size:.7rem;word-break:break-all">{$e($r['actor_url'])}</div></div>
   <div class="card"><div class="card-label">Request</div><div class="card-value" style="font-size:.72rem;word-break:break-all">{$e($requestSummary)}</div></div>
@@ -2273,6 +2337,15 @@ HTML;
 <div class="section-title">Raw activity JSON</div>
 <pre class="code">{$e($json)}</pre>
 HTML;
+    }
+
+    private function inboxDisposition(array $row): string
+    {
+        $disposition = (string)($row['disposition'] ?? '');
+        if (in_array($disposition, ['accepted', 'rejected', 'ignored'], true)) {
+            return $disposition;
+        }
+        return trim((string)($row['error'] ?? '')) !== '' ? 'rejected' : 'accepted';
     }
 
     // ── Maintenance content ───────────────────────────────────

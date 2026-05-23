@@ -472,7 +472,7 @@ class PollModel
                 'Accept: application/json',
                 'User-Agent: ' . AP_SOFTWARE . '/' . AP_VERSION . ' (+https://' . AP_DOMAIN . ')',
             ],
-        ]);
+        ] + RemoteActorModel::safeCurlResolveOptions($endpoint));
         $raw = curl_exec($ch);
         if (PHP_VERSION_ID < 80000) {
             curl_close($ch);

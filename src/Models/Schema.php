@@ -8,7 +8,7 @@ class Schema
     private static bool $done = false;
 
     /** Increment this when adding new tables or columns. */
-    public const SCHEMA_VERSION = 22;
+    public const SCHEMA_VERSION = 26;
 
     public static function install(): void
     {
@@ -51,6 +51,7 @@ class Schema
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL
         )");
+        self::ensureLoginAttemptTables($db);
 
         // Migrate existing users table (ADD COLUMN is idempotent via try/catch)
         foreach (['also_known_as TEXT NOT NULL DEFAULT \'[]\'',
@@ -117,6 +118,8 @@ class Schema
             reply_to_uid     TEXT,
             reblog_of_id     TEXT,
             quote_of_id      TEXT,
+            quote_policy     TEXT NOT NULL DEFAULT 'public',
+            title            TEXT NOT NULL DEFAULT '',
             content          TEXT NOT NULL DEFAULT '',
             cw               TEXT NOT NULL DEFAULT '',
             visibility       TEXT NOT NULL DEFAULT 'public',
@@ -130,6 +133,7 @@ class Schema
             created_at       TEXT NOT NULL,
             updated_at       TEXT NOT NULL
         )");
+        self::ensureStatusColumns($db);
         try { $db->exec("ALTER TABLE statuses ADD COLUMN expires_at TEXT"); } catch (\Throwable) {}
 
         $db->exec("CREATE INDEX IF NOT EXISTS idx_status_user ON statuses(user_id,created_at DESC)");
@@ -137,6 +141,7 @@ class Schema
         $db->exec("CREATE INDEX IF NOT EXISTS idx_status_uri  ON statuses(uri)");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_status_expires ON statuses(expires_at)");
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_of_id TEXT"); } catch (\Throwable) {}
+        try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_policy TEXT NOT NULL DEFAULT 'public'"); } catch (\Throwable) {}
         // Idempotency-Key support: prevents duplicate posts when the Mastodon iOS app retries
         // a failed status creation request. The key is per-user (same key from different users
         // is allowed). Index allows fast lookup without full table scan.
@@ -470,6 +475,7 @@ class Schema
             request_path TEXT NOT NULL DEFAULT '',
             request_host TEXT NOT NULL DEFAULT '',
             remote_ip  TEXT NOT NULL DEFAULT '',
+            disposition TEXT NOT NULL DEFAULT 'accepted',
             created_at TEXT NOT NULL
         )");
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN sig_headers TEXT NOT NULL DEFAULT '{}'"); } catch (\Throwable) {}
@@ -478,6 +484,7 @@ class Schema
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN request_path TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN request_host TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN remote_ip TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
+        self::ensureInboxLogDisposition($db);
 
         // Featured tags (shown on profile)
         $db->exec("CREATE TABLE IF NOT EXISTS featured_tags (
@@ -540,6 +547,8 @@ class Schema
         // Federated delivery queue — created centrally here so it can have proper indexes.
         // Delivery.php::ensureQueueTable() is kept for backwards compatibility but is now a no-op
         // on installations that ran this schema migration first.
+        self::ensureDeliveryLogTables($db);
+
         $db->exec("CREATE TABLE IF NOT EXISTS delivery_queue (
             id            TEXT PRIMARY KEY,
             actor_id      TEXT NOT NULL,
@@ -653,7 +662,11 @@ class Schema
 
     private static function ensureCriticalBackfills(\PDO $db): void
     {
+        self::ensureStatusColumns($db);
+        self::ensureDeliveryLogTables($db);
+        self::ensureLoginAttemptTables($db);
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_of_id TEXT"); } catch (\Throwable) {}
+        try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_policy TEXT NOT NULL DEFAULT 'public'"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN idempotency_key TEXT"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN expires_at TEXT"); } catch (\Throwable) {}
         try { $db->exec("CREATE TABLE IF NOT EXISTS tombstones (
@@ -670,8 +683,172 @@ class Schema
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN request_path TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN request_host TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE inbox_log ADD COLUMN remote_ip TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
+        self::ensureInboxLogDisposition($db);
+        try { $db->exec("CREATE INDEX IF NOT EXISTS idx_status_user ON statuses(user_id,created_at DESC)"); } catch (\Throwable) {}
         try { $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_status_idempotency ON statuses(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL"); } catch (\Throwable) {}
         try { $db->exec("CREATE INDEX IF NOT EXISTS idx_status_expires ON statuses(expires_at)"); } catch (\Throwable) {}
+    }
+
+    private static function ensureInboxLogDisposition(\PDO $db): void
+    {
+        try { $db->exec("ALTER TABLE inbox_log ADD COLUMN disposition TEXT NOT NULL DEFAULT 'accepted'"); } catch (\Throwable) {}
+        try {
+            $db->exec("UPDATE inbox_log
+                SET disposition=CASE WHEN error<>'' THEN 'rejected' ELSE 'accepted' END
+                WHERE disposition='' OR (disposition='accepted' AND error<>'')");
+        } catch (\Throwable) {}
+        try {
+            $base = str_replace("'", "''", defined('AP_BASE_URL') ? AP_BASE_URL : '');
+            $domain = str_replace("'", "''", defined('AP_DOMAIN') ? AP_DOMAIN : '');
+            $localGuard = "1=1";
+            if ($base !== '') {
+                $localGuard .= " AND raw_json NOT LIKE '%$base%'";
+            }
+            if ($domain !== '') {
+                $localGuard .= " AND raw_json NOT LIKE '%$domain%'";
+            }
+            $db->exec("UPDATE inbox_log
+                SET disposition='ignored'
+                WHERE error IN (
+                    'HTTP Signature signer does not match activity actor',
+                    'HTTP Signature signer does not match activity actor and activity actor proof is invalid',
+                    'HTTP Signature retry digest mismatch and origin fetch proof is invalid'
+                )
+                  AND sig_debug LIKE '%\"signed_actor\"%'
+                  AND $localGuard");
+            $db->exec("UPDATE inbox_log
+                SET disposition='ignored'
+                WHERE error='HTTP Signature verified but activity actor is missing'
+                  AND raw_json LIKE '[%'
+                  AND $localGuard");
+            $db->exec("UPDATE inbox_log
+                SET disposition='ignored'
+                WHERE error LIKE 'HTTP Signature verification failed [%'
+                  AND sig_debug LIKE '%\"retry\"%'
+                  AND $localGuard");
+        } catch (\Throwable) {}
+        try { $db->exec("CREATE INDEX IF NOT EXISTS idx_inbox_log_disposition_created ON inbox_log(disposition, created_at DESC)"); } catch (\Throwable) {}
+    }
+
+    private static function ensureDeliveryLogTables(\PDO $db): void
+    {
+        $db->exec("CREATE TABLE IF NOT EXISTS delivery_attempt_log (
+            id TEXT PRIMARY KEY,
+            queue_id TEXT NOT NULL DEFAULT '',
+            actor_id TEXT NOT NULL DEFAULT '',
+            inbox_url TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT '',
+            activity_type TEXT NOT NULL DEFAULT '',
+            object_type TEXT NOT NULL DEFAULT '',
+            object_ref TEXT NOT NULL DEFAULT '',
+            attempt_no INTEGER NOT NULL DEFAULT 0,
+            http_code INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL DEFAULT '',
+            error_bucket TEXT NOT NULL DEFAULT '',
+            error_detail TEXT NOT NULL DEFAULT '',
+            response_body TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )");
+        foreach ([
+            "queue_id TEXT NOT NULL DEFAULT ''",
+            "actor_id TEXT NOT NULL DEFAULT ''",
+            "inbox_url TEXT NOT NULL DEFAULT ''",
+            "domain TEXT NOT NULL DEFAULT ''",
+            "activity_type TEXT NOT NULL DEFAULT ''",
+            "object_type TEXT NOT NULL DEFAULT ''",
+            "object_ref TEXT NOT NULL DEFAULT ''",
+            'attempt_no INTEGER NOT NULL DEFAULT 0',
+            'http_code INTEGER NOT NULL DEFAULT 0',
+            "outcome TEXT NOT NULL DEFAULT ''",
+            "error_bucket TEXT NOT NULL DEFAULT ''",
+            "error_detail TEXT NOT NULL DEFAULT ''",
+            "response_body TEXT NOT NULL DEFAULT ''",
+            "created_at TEXT NOT NULL DEFAULT ''",
+        ] as $column) {
+            try { $db->exec("ALTER TABLE delivery_attempt_log ADD COLUMN $column"); } catch (\Throwable) {}
+        }
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_delivery_attempt_log_created ON delivery_attempt_log(created_at DESC)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_delivery_attempt_log_domain ON delivery_attempt_log(domain, created_at DESC)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_delivery_attempt_log_bucket ON delivery_attempt_log(error_bucket, created_at DESC)");
+
+        $db->exec("CREATE TABLE IF NOT EXISTS delivery_batch_log (
+            id TEXT PRIMARY KEY,
+            batch_limit INTEGER NOT NULL DEFAULT 0,
+            leased INTEGER NOT NULL DEFAULT 0,
+            processed INTEGER NOT NULL DEFAULT 0,
+            success INTEGER NOT NULL DEFAULT 0,
+            retry INTEGER NOT NULL DEFAULT 0,
+            terminal INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            due_remaining INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT ''
+        )");
+        foreach ([
+            'batch_limit INTEGER NOT NULL DEFAULT 0',
+            'leased INTEGER NOT NULL DEFAULT 0',
+            'processed INTEGER NOT NULL DEFAULT 0',
+            'success INTEGER NOT NULL DEFAULT 0',
+            'retry INTEGER NOT NULL DEFAULT 0',
+            'terminal INTEGER NOT NULL DEFAULT 0',
+            'skipped INTEGER NOT NULL DEFAULT 0',
+            'due_remaining INTEGER NOT NULL DEFAULT 0',
+            'duration_ms INTEGER NOT NULL DEFAULT 0',
+            "created_at TEXT NOT NULL DEFAULT ''",
+        ] as $column) {
+            try { $db->exec("ALTER TABLE delivery_batch_log ADD COLUMN $column"); } catch (\Throwable) {}
+        }
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_delivery_batch_log_created ON delivery_batch_log(created_at DESC)");
+    }
+
+    private static function ensureLoginAttemptTables(\PDO $db): void
+    {
+        $db->exec("CREATE TABLE IF NOT EXISTS admin_login_attempts (ip TEXT NOT NULL, ts INTEGER NOT NULL)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_ip_ts ON admin_login_attempts(ip, ts)");
+        $db->exec("CREATE TABLE IF NOT EXISTS web_login_attempts (ip TEXT NOT NULL, ts INTEGER NOT NULL)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_web_login_attempts_ip_ts ON web_login_attempts(ip, ts)");
+    }
+
+    private static function ensureStatusColumns(\PDO $db): void
+    {
+        $columns = [
+            'id'              => "TEXT NOT NULL DEFAULT ''",
+            'uri'             => "TEXT NOT NULL DEFAULT ''",
+            'user_id'         => "TEXT NOT NULL DEFAULT ''",
+            'reply_to_id'     => 'TEXT',
+            'reply_to_uid'    => 'TEXT',
+            'reblog_of_id'    => 'TEXT',
+            'quote_of_id'     => 'TEXT',
+            'quote_policy'    => "TEXT NOT NULL DEFAULT 'public'",
+            'title'           => "TEXT NOT NULL DEFAULT ''",
+            'content'         => "TEXT NOT NULL DEFAULT ''",
+            'cw'              => "TEXT NOT NULL DEFAULT ''",
+            'visibility'      => "TEXT NOT NULL DEFAULT 'public'",
+            'language'        => "TEXT NOT NULL DEFAULT 'pt'",
+            'sensitive'       => 'INTEGER NOT NULL DEFAULT 0',
+            'local'           => 'INTEGER NOT NULL DEFAULT 1',
+            'reply_count'     => 'INTEGER NOT NULL DEFAULT 0',
+            'reblog_count'    => 'INTEGER NOT NULL DEFAULT 0',
+            'favourite_count' => 'INTEGER NOT NULL DEFAULT 0',
+            'expires_at'      => 'TEXT',
+            'created_at'      => "TEXT NOT NULL DEFAULT ''",
+            'updated_at'      => "TEXT NOT NULL DEFAULT ''",
+            'idempotency_key' => 'TEXT',
+        ];
+
+        foreach ($columns as $name => $definition) {
+            if (self::hasColumn($db, 'statuses', $name)) continue;
+            try { $db->exec("ALTER TABLE statuses ADD COLUMN $name $definition"); } catch (\Throwable) {}
+        }
+
+        foreach (['actor_id', 'author_id', 'account_id', 'owner_id'] as $legacyColumn) {
+            if (!self::hasColumn($db, 'statuses', $legacyColumn)) continue;
+            try {
+                $db->exec("UPDATE statuses SET user_id=$legacyColumn WHERE user_id='' AND $legacyColumn IS NOT NULL AND $legacyColumn<>''");
+            } catch (\Throwable) {}
+        }
+
+        try { $db->exec("UPDATE statuses SET uri=id WHERE uri='' AND id IS NOT NULL AND id<>''"); } catch (\Throwable) {}
     }
 
     private static function criticalBackfillsMarkerPath(): string
@@ -688,22 +865,29 @@ class Schema
 
     private static function criticalBackfillsPresent(\PDO $db): bool
     {
-        $hasColumn = static function (string $table, string $column) use ($db): bool {
-            try {
-                $rows = $db->query('PRAGMA table_info(' . $table . ')')->fetchAll(\PDO::FETCH_ASSOC) ?: [];
-            } catch (\Throwable) {
-                return false;
-            }
-            foreach ($rows as $row) {
-                if (($row['name'] ?? null) === $column) return true;
-            }
-            return false;
-        };
-
-        if (!$hasColumn('statuses', 'idempotency_key')) return false;
-        if (!$hasColumn('statuses', 'quote_of_id')) return false;
-        if (!$hasColumn('statuses', 'expires_at')) return false;
+        foreach (['id', 'uri', 'user_id', 'visibility', 'local', 'created_at', 'updated_at'] as $column) {
+            if (!self::hasColumn($db, 'statuses', $column)) return false;
+        }
+        if (!self::hasColumn($db, 'statuses', 'idempotency_key')) return false;
+        if (!self::hasColumn($db, 'statuses', 'quote_of_id')) return false;
+        if (!self::hasColumn($db, 'statuses', 'quote_policy')) return false;
+        if (!self::hasColumn($db, 'statuses', 'title')) return false;
+        if (!self::hasColumn($db, 'statuses', 'expires_at')) return false;
+        if (!self::hasColumn($db, 'inbox_log', 'disposition')) return false;
         return true;
+    }
+
+    private static function hasColumn(\PDO $db, string $table, string $column): bool
+    {
+        try {
+            $rows = $db->query('PRAGMA table_info(' . $table . ')')->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+        } catch (\Throwable) {
+            return false;
+        }
+        foreach ($rows as $row) {
+            if (($row['name'] ?? null) === $column) return true;
+        }
+        return false;
     }
 
     private static function markCriticalBackfills(): void

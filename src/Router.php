@@ -144,9 +144,11 @@ class Router
         $this->get('/api/v1/media/:id',               'Api\MediaCtrl@show');
         $this->put('/api/v1/media/:id',               'Api\MediaCtrl@update');
         $this->patch('/api/v1/media/:id',             'Api\MediaCtrl@update');
+        $this->delete('/api/v1/media/:id',            'Api\MediaCtrl@delete');
         $this->get('/api/v2/media/:id',               'Api\MediaCtrl@show');
         $this->put('/api/v2/media/:id',               'Api\MediaCtrl@update');
         $this->patch('/api/v2/media/:id',             'Api\MediaCtrl@update');
+        $this->delete('/api/v2/media/:id',            'Api\MediaCtrl@delete');
 
         // ── Trends (v1 + v2 aliases) ──────────────────────────
         $this->get('/api/v1/trends',                  'Api\TrendsCtrl@tags');

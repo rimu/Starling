@@ -174,17 +174,24 @@ HTML;
     private function renderPublicQuote(array $status): string
     {
         $quote = StatusModel::toMasto($status, null)['quote'] ?? null;
-        if (!$quote || empty($quote['account'])) return '';
-        $acct = $quote['account'];
-        $targetUrl = htmlspecialchars((string)($quote['url'] ?? ('/@' . $acct['username'] . '/' . $quote['id'])), ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $mediaBadge = !empty($quote['media_attachments']) ? '<span class="quote-badge">' . count($quote['media_attachments']) . ' media</span>' : '';
-        $pollBadge = !empty($quote['poll']) ? '<span class="quote-badge">Poll</span>' : '';
-        return '<a class="quote-card" href="' . $targetUrl . '" onclick="event.stopPropagation()">'
+        $quoted = is_array($quote) && isset($quote['quoted_status']) && is_array($quote['quoted_status']) ? $quote['quoted_status'] : $quote;
+        if (!$quoted || empty($quoted['account'])) return '';
+        $acct = $quoted['account'];
+        $targetUrlRaw = (string)($quoted['url'] ?? ('/@' . $acct['username'] . '/' . $quoted['id']));
+        $targetUrl = htmlspecialchars($targetUrlRaw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $targetUrlJs = htmlspecialchars(json_encode($targetUrlRaw, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $mediaBadge = !empty($quoted['media_attachments']) ? '<span class="quote-badge">' . count($quoted['media_attachments']) . ' media</span>' : '';
+        $pollBadge = !empty($quoted['poll']) ? '<span class="quote-badge">Poll</span>' : '';
+        $titleHtml = trim((string)($quoted['title'] ?? '')) !== ''
+            ? '<div class="quote-title">' . htmlspecialchars((string)$quoted['title'], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</div>'
+            : '';
+        return '<div class="quote-card" role="link" tabindex="0" data-href="' . $targetUrl . '" onclick="event.stopPropagation();if(event.target.closest(\'a,button,input,textarea,select,label\'))return;window.location.href=' . $targetUrlJs . '" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();window.location.href=' . $targetUrlJs . '}">'
             . '<div class="quote-head"><img class="quote-avatar" src="' . htmlspecialchars((string)$acct['avatar'], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '" alt="">'
             . '<div class="quote-meta"><strong>' . htmlspecialchars((string)($acct['display_name'] ?: $acct['username']), ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</strong><span>@' . htmlspecialchars((string)$acct['acct'], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</span></div></div>'
-            . '<div class="quote-content">' . ($quote['content'] ?? '<p></p>') . '</div>'
+            . $titleHtml
+            . '<div class="quote-content">' . ($quoted['content'] ?? '<p></p>') . '</div>'
             . (($mediaBadge || $pollBadge) ? '<div class="quote-flags">' . $mediaBadge . $pollBadge . '</div>' : '')
-            . '</a>';
+            . '</div>';
     }
 
     private function renderPublicPoll(string $statusId, string $suffix = ''): string
@@ -457,6 +464,11 @@ HTML;
                 $postUrl = htmlspecialchars(ap_url('@' . $u['username'] . '/' . $s['id']));
             }
             $interactUrl = htmlspecialchars($interactUrlRaw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $countStatus = ($kind === 'boost' && $orig) ? $orig : $s;
+            $titleRaw = trim((string)($countStatus['title'] ?? ''));
+            $titleHtml = $titleRaw !== ''
+                ? '<div class="status-title">' . htmlspecialchars($titleRaw, ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</div>'
+                : '';
             $contentTextLen = function_exists('mb_strlen') ? mb_strlen(trim(strip_tags($content))) : strlen(trim(strip_tags($content)));
             $truncateContent = $contentTextLen > 600;
             $contentClass = $truncateContent ? 's-content truncated' : 's-content';
@@ -523,9 +535,9 @@ HTML;
             }
 
             // CW
-            $hasCw = (string)($s['cw'] ?? '') !== '';
+            $hasCw = (string)($countStatus['cw'] ?? '') !== '';
             $cw = $hasCw
-                ? '<div class="cw-bar"><span>⚠ ' . htmlspecialchars($s['cw']) . '</span><button class="cw-toggle" onclick="event.stopPropagation();toggleCWContent(this)">Show more</button></div>'
+                ? '<div class="cw-bar"><span>⚠ ' . htmlspecialchars((string)$countStatus['cw'], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '</span><button class="cw-toggle" onclick="event.stopPropagation();toggleCWContent(this)">Show more</button></div>'
                 : '';
             $cwContentStyle = $hasCw ? ' style="display:none"' : '';
 
@@ -548,7 +560,6 @@ HTML;
                 }
             }
             // Action bar counts
-            $countStatus = ($kind === 'boost' && $orig) ? $orig : $s;
             $visBadge = (($countStatus['visibility'] ?? 'public') === 'unlisted')
                 ? '<span class="vis-icon" title="unlisted"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="vertical-align:middle"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM12 17c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg></span>'
                 : '';
@@ -593,6 +604,7 @@ HTML;
         <span class="s-time" title="$tsTitle">$ts</span>
       </div>
       $replyIndicator
+      $titleHtml
       $cw
       <div class="cw-content"$cwContentStyle>
         <div class="$contentClass">$content</div>
@@ -761,6 +773,7 @@ a:hover{text-decoration:underline}
 .reply-to-name:hover{color:var(--blue);text-decoration:underline}
 
 /* Content — exact copy from web client */
+.status-title{font-size:.98rem;font-weight:750;line-height:1.28;margin:.12rem 0 .4rem;color:var(--text);word-break:break-word}
 .s-content{font-size:.9rem;line-height:1.5;word-break:break-word;margin-bottom:.5rem}
 .s-content.truncated{max-height:12rem;overflow:hidden;position:relative}
 .s-content.truncated::after{
@@ -844,12 +857,13 @@ a:hover{text-decoration:underline}
 .poll-meta{font-size:.78rem;color:var(--text3);margin-top:.55rem}
 .poll-toggle-btn{margin-bottom:.65rem;border:1px solid var(--border);background:var(--surface);color:var(--text2);border-radius:9999px;padding:.42rem .9rem;font-weight:700;font-size:.8rem;cursor:pointer;font-family:inherit}
 .poll-toggle-btn:hover{background:var(--hover);color:var(--text)}
-.quote-card{display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;margin-bottom:.65rem;background:var(--surface);color:inherit;text-decoration:none}
+.quote-card{display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;margin-bottom:.65rem;background:var(--surface);color:inherit;text-decoration:none;cursor:pointer}
 .quote-card:hover{background:var(--hover);text-decoration:none}
 .quote-head{display:flex;align-items:center;gap:.55rem;margin-bottom:.45rem}
 .quote-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0}
 .quote-meta{display:flex;flex-wrap:wrap;gap:.35rem;font-size:.8rem;color:var(--text3)}
 .quote-meta strong{color:var(--text);font-weight:700}
+.quote-title{font-size:.88rem;font-weight:750;line-height:1.3;color:var(--text);margin-bottom:.3rem;word-break:break-word}
 .quote-content{font-size:.86rem;line-height:1.45;word-break:break-word}
 .quote-content p{margin-bottom:.25rem}
 .quote-content p:last-child{margin-bottom:0}

@@ -5,6 +5,52 @@ namespace App\Models;
 
 class OAuthModel
 {
+    private const TOKEN_HASH_PREFIX = 'sha256:';
+
+    public static function tokenStorageValue(string $token): string
+    {
+        $token = trim($token);
+        if ($token === '' || str_starts_with($token, self::TOKEN_HASH_PREFIX)) {
+            return $token;
+        }
+        return self::TOKEN_HASH_PREFIX . hash('sha256', $token);
+    }
+
+    public static function tokenExpiresIn(): int
+    {
+        $ttlDays = function_exists('oauth_token_ttl_days') ? oauth_token_ttl_days() : 365;
+        return $ttlDays > 0 ? $ttlDays * 86400 : 315360000;
+    }
+
+    private static function tokenLookupValues(string $token): array
+    {
+        $raw = trim($token);
+        if ($raw === '') return [];
+        return array_values(array_unique([$raw, self::tokenStorageValue($raw)]));
+    }
+
+    private static function ensureTokenHashes(): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+
+        try {
+            $rows = DB::all('SELECT token FROM oauth_tokens WHERE token NOT LIKE ?', [self::TOKEN_HASH_PREFIX . '%']);
+            foreach ($rows as $row) {
+                $plain = (string)($row['token'] ?? '');
+                $hashed = self::tokenStorageValue($plain);
+                if ($plain === '' || $hashed === $plain) continue;
+                try {
+                    DB::run('UPDATE oauth_tokens SET token=? WHERE token=?', [$hashed, $plain]);
+                } catch (\Throwable) {
+                    DB::delete('oauth_tokens', 'token=?', [$plain]);
+                }
+            }
+        } catch (\Throwable) {
+        }
+    }
+
     public static function parseRedirectUris(mixed $raw): array
     {
         $items = is_array($raw)
@@ -116,7 +162,9 @@ class OAuthModel
 
     public static function appByClientCredentials(string $cid, string $secret): ?array
     {
-        return DB::one('SELECT * FROM oauth_apps WHERE client_id=? AND client_secret=?', [$cid, $secret]);
+        $app = self::appByClientId($cid);
+        if (!$app) return null;
+        return hash_equals((string)($app['client_secret'] ?? ''), $secret) ? $app : null;
     }
 
     public static function appById(string $id): ?array
@@ -174,9 +222,10 @@ class OAuthModel
 
     public static function createToken(string $appId, string $userId, string $scopes): string
     {
+        self::ensureTokenHashes();
         $tok = bin2hex(random_bytes(32));
         DB::insert('oauth_tokens', [
-            'token'      => $tok,
+            'token'      => self::tokenStorageValue($tok),
             'app_id'     => $appId,
             'user_id'    => $userId,
             'scopes'     => $scopes,
@@ -187,12 +236,20 @@ class OAuthModel
 
     public static function tokenByValue(string $tok): ?array
     {
-        $row = DB::one('SELECT * FROM oauth_tokens WHERE token=?', [$tok]);
-        if ($row && oauth_token_is_expired($row)) {
-            DB::delete('oauth_tokens', 'token=?', [$tok]);
+        self::ensureTokenHashes();
+        if (str_starts_with(trim($tok), self::TOKEN_HASH_PREFIX)) {
             return null;
         }
-        return $row;
+        foreach (self::tokenLookupValues($tok) as $value) {
+            $row = DB::one('SELECT * FROM oauth_tokens WHERE token=?', [$value]);
+            if (!$row) continue;
+            if (oauth_token_is_expired($row)) {
+                DB::delete('oauth_tokens', 'token=?', [(string)$row['token']]);
+                return null;
+            }
+            return $row;
+        }
+        return null;
     }
 
     public static function userByToken(string $tok): ?array
@@ -223,7 +280,11 @@ class OAuthModel
 
     public static function revoke(string $tok): void
     {
-        DB::delete('oauth_tokens', 'token=?', [$tok]);
+        self::ensureTokenHashes();
+        $values = self::tokenLookupValues($tok);
+        if (!$values) return;
+        $placeholders = implode(',', array_fill(0, count($values), '?'));
+        DB::delete('oauth_tokens', 'token IN (' . $placeholders . ')', $values);
     }
 
     public static function appToMasto(array $a): array

@@ -184,9 +184,18 @@ class SearchCtrl
 
 class MediaCtrl
 {
+    private function localMediaPath(?string $url): ?string
+    {
+        $path = (string)parse_url((string)$url, PHP_URL_PATH);
+        $file = basename($path);
+        if ($file === '') return null;
+        return AP_MEDIA_DIR . '/' . $file;
+    }
+
     public function upload(array $p): void
     {
         $user = require_auth(['write', 'write:media']);
+        enforce_request_body_limit();
         $file = $_FILES['file'] ?? null;
         if (!$file) err_out('No file uploaded', 422);
         $m = MediaModel::upload($file, $user['id']);
@@ -296,6 +305,27 @@ class MediaCtrl
         $m = DB::one('SELECT * FROM media_attachments WHERE id=? AND user_id=?', [$p['id'], $user['id']]);
         if (!$m) err_out('Not found', 404);
         json_out(MediaModel::toMasto($m));
+    }
+
+    public function delete(array $p): void
+    {
+        $user = require_auth(['write', 'write:media']);
+        $m = DB::one('SELECT * FROM media_attachments WHERE id=? AND user_id=?', [$p['id'], $user['id']]);
+        if (!$m) err_out('Not found', 404);
+        if (!empty($m['status_id'])) err_out('Media is already attached to a status', 422);
+        $linked = DB::one('SELECT 1 AS ok FROM status_media WHERE media_id=? LIMIT 1', [$p['id']]);
+        if ($linked) err_out('Media is already attached to a status', 422);
+
+        $paths = array_unique(array_filter([
+            $this->localMediaPath((string)($m['url'] ?? '')),
+            $this->localMediaPath((string)($m['preview_url'] ?? '')),
+        ]));
+        foreach ($paths as $path) {
+            if (is_string($path) && is_file($path)) @unlink($path);
+        }
+
+        DB::delete('media_attachments', 'id=? AND user_id=?', [$p['id'], $user['id']]);
+        json_out([]);
     }
 }
 
@@ -1247,6 +1277,7 @@ class MiscCtrl
             if (in_array($stream, ['user', 'home'])) {
                 $blockedDomains  = \App\Models\StatusModel::blockedDomains($user['id']);
                 $domainFilterSSE = \App\Models\StatusModel::domainBlockSql('s.user_id', $blockedDomains);
+                $tombstoneDomainFilterSSE = \App\Models\StatusModel::domainBlockSql('user_id', $blockedDomains);
                 // Novos posts na home timeline
                 $rows = \App\Models\DB::all(
                     "SELECT s.* FROM statuses s
@@ -1336,10 +1367,10 @@ class MiscCtrl
                             AND visibility IN ('public','unlisted','private')
                         )
                      )
-                     AND user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)
-                     AND user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)
-                     {$domainFilterSSE}
-                     ORDER BY deleted_at ASC LIMIT 10",
+	                     AND user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)
+	                     AND user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)
+	                     {$tombstoneDomainFilterSSE}
+	                     ORDER BY deleted_at ASC LIMIT 10",
                     [$since, $user['id'], $user['id'], $user['id'], $user['id']]
                 );
                 foreach ($deleted as $t) {
