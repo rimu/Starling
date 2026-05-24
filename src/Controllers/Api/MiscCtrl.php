@@ -623,29 +623,65 @@ class ConversationsCtrl
 
             $accounts = [];
             $seen = [];
-            $phs = implode(',', array_fill(0, count($allIds), '?'));
-            $threadStatuses = DB::all("SELECT DISTINCT user_id FROM statuses WHERE id IN ($phs)", $allIds);
-            foreach ($threadStatuses as $row) {
-                $uid = $row['user_id'];
-                if (isset($seen[$uid])) continue;
-                if ($this->isHiddenFromViewer($user['id'], $uid)) continue;
-                $seen[$uid] = true;
+            $addInternalAccount = function (string $uid) use (&$accounts, &$seen, $user): void {
+                if ($uid === '' || $this->isHiddenFromViewer($user['id'], $uid)) return;
                 $local = UserModel::byId($uid);
                 if ($local) {
-                    if (!empty($local['is_suspended'])) continue;
+                    if (!empty($local['is_suspended'])) return;
+                    $key = 'local:' . $local['id'];
+                    if (isset($seen[$key])) return;
+                    $seen[$key] = true;
                     $masto = UserModel::toMasto($local, $user['id']);
                     if ($masto) $accounts[] = $masto;
-                    continue;
+                    return;
                 }
                 $ra = DB::one('SELECT * FROM remote_actors WHERE id=?', [$uid]);
-                if ($ra) $accounts[] = UserModel::remoteToMasto($ra);
+                if ($ra) {
+                    if ($this->isHiddenFromViewer($user['id'], (string)$ra['id'])) return;
+                    $key = 'remote:' . $ra['id'];
+                    if (isset($seen[$key])) return;
+                    $seen[$key] = true;
+                    $accounts[] = UserModel::remoteToMasto($ra);
+                }
+            };
+            $addMentionAccount = function (array $mention) use (&$accounts, &$seen, $user, $addInternalAccount): void {
+                $mentionId = (string)($mention['id'] ?? '');
+                if ($mentionId !== '' && UserModel::byId($mentionId)) {
+                    $addInternalAccount($mentionId);
+                    return;
+                }
+
+                $ra = null;
+                if ($mentionId !== '') {
+                    $ra = DB::one('SELECT * FROM remote_actors WHERE masto_id=? OR id=?', [$mentionId, $mentionId]);
+                }
+                if (!$ra) {
+                    $acct = (string)($mention['acct'] ?? '');
+                    if (str_contains($acct, '@')) {
+                        [$username, $domain] = explode('@', $acct, 2);
+                        $ra = DB::one('SELECT * FROM remote_actors WHERE username=? AND domain=?', [$username, strtolower($domain)]);
+                    }
+                }
+                if (!$ra || $this->isHiddenFromViewer($user['id'], (string)$ra['id'])) return;
+
+                $key = 'remote:' . $ra['id'];
+                if (isset($seen[$key])) return;
+                $seen[$key] = true;
+                $accounts[] = UserModel::remoteToMasto($ra);
+            };
+
+            $phs = implode(',', array_fill(0, count($allIds), '?'));
+            $threadStatuses = DB::all("SELECT * FROM statuses WHERE id IN ($phs)", $allIds);
+            foreach ($threadStatuses as $threadStatus) {
+                $addInternalAccount((string)$threadStatus['user_id']);
+                $threadMasto = StatusModel::toMasto($threadStatus, $user['id']);
+                foreach (($threadMasto['mentions'] ?? []) as $mention) {
+                    if (is_array($mention)) $addMentionAccount($mention);
+                }
             }
 
             // Garantir que o viewer está na lista
-            if (!isset($seen[$user['id']])) {
-                $viewer = UserModel::byId($user['id']);
-                if ($viewer) $accounts[] = UserModel::toMasto($viewer, $user['id']);
-            }
+            $addInternalAccount($user['id']);
 
             $hasVisibleOther = false;
             foreach ($accounts as $account) {
