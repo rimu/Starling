@@ -1084,7 +1084,7 @@ class AdminCtrl
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');
         header('X-Robots-Tag: noindex, nofollow');
-        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none';");
+        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: blob: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none';");
         echo $content;
         exit;
     }

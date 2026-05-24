@@ -5,29 +5,46 @@ namespace App\Models;
 
 class MediaModel
 {
+    private const IMAGE_MIME_TYPES = [
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+        'image/avif',
+        'image/heic',
+        'image/heif',
+    ];
+
+    private const UPLOAD_MIME_TYPES = [
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+        'image/avif',
+        'image/heic',
+        'image/heif',
+        'video/mp4',
+        'video/webm',
+        'video/quicktime',
+    ];
+
     private const BLURHASH_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~';
     private const IMAGE_MATRIX_LIMIT = 16777216;
 
-    public static function upload(array $file, string $userId): ?array
+    public static function upload(array $file, string $userId, ?array $allowedMimeTypes = null): ?array
     {
-        $allowed = [
-            'image/jpeg',
-            'image/png',
-            'image/gif',
-            'image/webp',
-            'image/avif',
-            'image/heic',
-            'image/heif',
-            'video/mp4',
-            'video/webm',
-            'video/quicktime',
-        ];
+        if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) return null;
+        $tmpName = (string)($file['tmp_name'] ?? '');
+        if ($tmpName === '' || !is_file($tmpName)) return null;
+
+        $allowed = $allowedMimeTypes ?? self::UPLOAD_MIME_TYPES;
         $finfo   = new \finfo(FILEINFO_MIME_TYPE);
-        $mime    = $finfo->file($file['tmp_name']) ?: '';
+        $mime    = $finfo->file($tmpName) ?: '';
         if (!in_array($mime, $allowed)) return null;
 
         $max = AP_MAX_UPLOAD_MB * 1024 * 1024;
-        if ($file['size'] > $max) return null;
+        $size = (int)($file['size'] ?? filesize($tmpName));
+        if ($size <= 0 || $size > $max) return null;
 
         if (!is_dir(AP_MEDIA_DIR)) mkdir(AP_MEDIA_DIR, 0755, true);
 
@@ -49,13 +66,13 @@ class MediaModel
         $dest = AP_MEDIA_DIR . '/' . $name;
 
         // move_uploaded_file só funciona com POST normal; para PATCH manual usamos rename/copy
-        $moved = move_uploaded_file($file['tmp_name'], $dest);
+        $moved = move_uploaded_file($tmpName, $dest);
         if (!$moved) {
             // Ficheiro criado manualmente via tempnam (PATCH multipart)
-            $moved = rename($file['tmp_name'], $dest);
+            $moved = rename($tmpName, $dest);
             if (!$moved) {
-                $moved = copy($file['tmp_name'], $dest);
-                if ($moved) @unlink($file['tmp_name']);
+                $moved = copy($tmpName, $dest);
+                if ($moved) @unlink($tmpName);
             }
         }
         if (!$moved) return null;
@@ -91,6 +108,11 @@ class MediaModel
         ]);
 
         return DB::one('SELECT * FROM media_attachments WHERE id=?', [$id]);
+    }
+
+    public static function uploadImage(array $file, string $userId): ?array
+    {
+        return self::upload($file, $userId, self::IMAGE_MIME_TYPES);
     }
 
     public static function toMasto(array $m): array

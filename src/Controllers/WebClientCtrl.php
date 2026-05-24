@@ -415,7 +415,7 @@ class WebClientCtrl
         header('Content-Type: text/html; charset=utf-8');
         header('Cache-Control: no-store, no-cache');
         header('X-Content-Type-Options: nosniff');
-        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
+        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: blob: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
         echo $s;
         exit;
     }
@@ -2328,6 +2328,13 @@ function mediaUrlOrFallback(value, fallback) {
     const url = String(value || '').trim();
     if (!url || /missing\.png(?:[?#].*)?$/i.test(url)) return fallback;
     return url;
+}
+
+function isDefaultMediaUrl(value, fallback) {
+    const url = String(value || '').trim();
+    if (!url || /missing\.png(?:[?#].*)?$/i.test(url)) return true;
+    const clean = url.split(/[?#]/)[0];
+    return clean === fallback || clean.endsWith(fallback);
 }
 
 function avatarAttrs(value) {
@@ -5667,6 +5674,8 @@ async function showEditProfile() {
 const EditProfile = {
     _avatarFile: null,
     _headerFile: null,
+    _avatarObjectUrl: null,
+    _headerObjectUrl: null,
 
     updateCounter(inputId, counterId, limit) {
         const input = document.getElementById(inputId);
@@ -5691,22 +5700,40 @@ const EditProfile = {
         if (value) value.value = '';
     },
 
+    isImageFile(file) {
+        return file && (!file.type || file.type.startsWith('image/'));
+    },
+
     previewAvatar(input) {
         const file = input.files[0];
         if (!file) return;
+        if (!this.isImageFile(file)) {
+            input.value = '';
+            Toast.err('Choose an image file for the avatar.');
+            return;
+        }
         this._avatarFile = file;
-        document.getElementById('ep-avatar-img').src = URL.createObjectURL(file);
+        if (this._avatarObjectUrl) URL.revokeObjectURL(this._avatarObjectUrl);
+        this._avatarObjectUrl = URL.createObjectURL(file);
+        document.getElementById('ep-avatar-img').src = this._avatarObjectUrl;
         const hero = document.getElementById('ep-hero-avatar');
-        if (hero) hero.src = document.getElementById('ep-avatar-img').src;
+        if (hero) hero.src = this._avatarObjectUrl;
     },
 
     previewHeader(input) {
         const file = input.files[0];
         if (!file) return;
+        if (!this.isImageFile(file)) {
+            input.value = '';
+            Toast.err('Choose an image file for the banner.');
+            return;
+        }
         this._headerFile = file;
         const preview = input.closest('.ep-banner');
         const img = preview.querySelector('img') || document.createElement('img');
-        img.src = URL.createObjectURL(file);
+        if (this._headerObjectUrl) URL.revokeObjectURL(this._headerObjectUrl);
+        this._headerObjectUrl = URL.createObjectURL(file);
+        img.src = this._headerObjectUrl;
         if (!preview.querySelector('img')) { preview.querySelector('.ep-banner-placeholder')?.remove(); preview.prepend(img); }
     },
 
@@ -5728,15 +5755,57 @@ const EditProfile = {
                 fd.append(`fields_attributes[${i}][name]`, field.name);
                 fd.append(`fields_attributes[${i}][value]`, field.value);
             });
+            const hadAvatarUpload = !!this._avatarFile;
+            const hadHeaderUpload = !!this._headerFile;
             if (this._avatarFile) fd.append('avatar', this._avatarFile);
             if (this._headerFile) fd.append('header', this._headerFile);
-            const account = await Api.patch('/api/v1/accounts/update_credentials', fd);
+            let account = await Api.patch('/api/v1/accounts/update_credentials', fd);
+            if (hadAvatarUpload || hadHeaderUpload) {
+                const avatarCandidate = account.avatar || account.avatar_static || '';
+                const headerCandidate = account.header || account.header_static || '';
+                const needsRefresh =
+                    (hadAvatarUpload && isDefaultMediaUrl(avatarCandidate, DEFAULT_AVATAR_URL)) ||
+                    (hadHeaderUpload && isDefaultMediaUrl(headerCandidate, DEFAULT_HEADER_URL));
+                if (needsRefresh) {
+                    try { account = await Api.get('/api/v1/accounts/verify_credentials'); } catch {}
+                }
+            }
             status.className = 'ep-status ok';
             status.textContent = '✓ Saved!';
             this._avatarFile = null; this._headerFile = null;
-            // Update nav
+            const avatarInput = document.getElementById('ep-avatar-input');
+            const headerInput = document.getElementById('ep-header-input');
+            if (avatarInput) avatarInput.value = '';
+            if (headerInput) headerInput.value = '';
+            const avatarCandidate = account.avatar || account.avatar_static || '';
+            const headerCandidate = account.header || account.header_static || '';
+            const nextAvatar = hadAvatarUpload
+                ? (isDefaultMediaUrl(avatarCandidate, DEFAULT_AVATAR_URL) ? '' : avatarCandidate)
+                : mediaUrlOrFallback(avatarCandidate, WCFG.myAvatar || DEFAULT_AVATAR_URL);
+            const nextHeader = hadHeaderUpload
+                ? (isDefaultMediaUrl(headerCandidate, DEFAULT_HEADER_URL) ? '' : headerCandidate)
+                : mediaUrlOrFallback(headerCandidate, DEFAULT_HEADER_URL);
+            let avatarReplaced = false;
+            let headerReplaced = false;
+            if (nextAvatar) {
+                WCFG.myAvatar = nextAvatar;
+                const epAv = document.getElementById('ep-avatar-img');
+                if (epAv) epAv.src = nextAvatar;
+                const heroAv = document.getElementById('ep-hero-avatar');
+                if (heroAv) heroAv.src = nextAvatar;
+                const composeAv = document.getElementById('compose-avatar');
+                if (composeAv) composeAv.src = nextAvatar;
+                avatarReplaced = true;
+            }
+            if (nextHeader) {
+                const bannerImg = document.querySelector('.ep-banner img');
+                if (bannerImg) bannerImg.src = nextHeader;
+                headerReplaced = true;
+            }
+            if (this._avatarObjectUrl && avatarReplaced) { URL.revokeObjectURL(this._avatarObjectUrl); this._avatarObjectUrl = null; }
+            if (this._headerObjectUrl && headerReplaced) { URL.revokeObjectURL(this._headerObjectUrl); this._headerObjectUrl = null; }
             const navAv = document.getElementById('nav-avatar');
-            if (navAv && account.avatar) navAv.src = account.avatar;
+            if (navAv && nextAvatar) navAv.src = nextAvatar;
             const nn = document.getElementById('nav-name');
             if (nn) nn.textContent = account.display_name || account.username;
             WCFG.myDisplayName = account.display_name || account.username;

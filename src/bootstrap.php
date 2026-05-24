@@ -169,7 +169,7 @@ if ($apAllowInstall && $userCount === 0) {
 // ── Security headers ─────────────────────────────────────────
 if (!headers_sent()) {
     header('X-Content-Type-Options: nosniff');
-    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
+    header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; img-src 'self' data: blob: https:; media-src 'self' data: https: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self';");
     if (!AP_DEBUG && is_https_request()) {
         header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
     }

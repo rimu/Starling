@@ -483,15 +483,17 @@ function req_body(): array
         $parsed = [];
         // Extrair boundary
         $flatParts = [];
-        if (preg_match('/boundary=([^\s;]+)/i', $ct, $bm)) {
-            $boundary = $bm[1];
+        if (preg_match('/boundary=(?:"([^"]+)"|([^\s;]+))/i', $ct, $bm)) {
+            $boundary = $bm[1] !== '' ? $bm[1] : $bm[2];
             $raw = raw_input_body();
             $parts = preg_split('/--' . preg_quote($boundary, '/') . '(?:--)?/', $raw);
             foreach ($parts as $part) {
                 $part = ltrim($part, "\r\n");
                 if ($part === '' || $part === '--') continue;
                 [$rawHeaders, $body] = array_pad(explode("\r\n\r\n", $part, 2), 2, '');
-                $body = rtrim($body, "\r\n");
+                if (str_ends_with($body, "\r\n")) {
+                    $body = substr($body, 0, -2);
+                }
                 // Parse headers da part
                 $headers = [];
                 foreach (explode("\r\n", $rawHeaders) as $hLine) {

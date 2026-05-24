@@ -400,13 +400,15 @@ use App\ActivityPub\{Builder, Delivery};
             if (isset($src['discoverable'])) $upd['discoverable'] = (int)bool_val($src['discoverable']);
         }
 
-        if (!empty($_FILES['avatar']['tmp_name'])) {
-            $m = MediaModel::upload($_FILES['avatar'], $user['id']);
-            if ($m) $upd['avatar'] = $m['url'];
+        if (isset($_FILES['avatar'])) {
+            $m = MediaModel::uploadImage($_FILES['avatar'], $user['id']);
+            if (!$m) err_out('Avatar upload failed (image type or size not allowed)', 422);
+            $upd['avatar'] = $m['url'];
         }
-        if (!empty($_FILES['header']['tmp_name'])) {
-            $m = MediaModel::upload($_FILES['header'], $user['id']);
-            if ($m) $upd['header'] = $m['url'];
+        if (isset($_FILES['header'])) {
+            $m = MediaModel::uploadImage($_FILES['header'], $user['id']);
+            if (!$m) err_out('Header upload failed (image type or size not allowed)', 422);
+            $upd['header'] = $m['url'];
         }
 
         // Password change: requires current_password + new password
