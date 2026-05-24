@@ -429,6 +429,17 @@ class StatusModel
                     AND (s.user_id LIKE 'http%' OR s.user_id NOT IN (SELECT id FROM users WHERE is_suspended=1))
                     AND s.user_id NOT IN (SELECT target_id FROM blocks WHERE user_id=?)
                     AND s.user_id NOT IN (SELECT target_id FROM mutes  WHERE user_id=?)
+                    AND NOT (
+                        s.reblog_of_id IS NOT NULL
+                        AND s.user_id<>?
+                        AND EXISTS (
+                            SELECT 1 FROM follows f
+                            WHERE f.follower_id=?
+                              AND f.following_id=s.user_id
+                              AND f.pending=0
+                              AND f.show_reblogs=0
+                        )
+                    )
                     {$domainFilter}
                     ORDER BY s.created_at DESC, s.id DESC
                     LIMIT ?
@@ -436,7 +447,7 @@ class StatusModel
                 SELECT s.* FROM statuses s
                 JOIN home_window hw ON hw.id = s.id
                 WHERE 1=1";
-        $p = [$userId, $userId, $userId, now_iso(), $userId, $userId, $windowSize];
+        $p = [$userId, $userId, $userId, now_iso(), $userId, $userId, $userId, $userId, $windowSize];
 
         // Paginação por (created_at, id) — cursor composto evita posts duplicados
         // quando há timestamps iguais.

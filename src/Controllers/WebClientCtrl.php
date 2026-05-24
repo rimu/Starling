@@ -615,7 +615,7 @@ class WebClientCtrl
   <div class="bs-divider"></div>
   <a class="bs-item" data-view="FAVOURITES" href="/web/favourites">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/></svg>
-    <span>Favorites</span>
+    <span>Likes</span>
   </a>
   <a class="bs-item" data-view="BOOKMARKS" href="/web/bookmarks">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3 7 3V5c0-1.1-.9-2-2-2zm0 15l-5-2.18L7 18V5h10v13z"/></svg>
@@ -1059,17 +1059,53 @@ button{font-family:inherit}
   position:sticky;top:0;z-index:11;
   background:var(--bg);
   border-bottom:1px solid var(--border);
-  overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch
+  overflow:visible
 }
 #home-tabs-bar::-webkit-scrollbar{display:none}
+.home-tabs-scroll{
+  display:flex;align-items:stretch;flex:1 1 auto;min-width:0;
+  overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch
+}
+.home-tabs-scroll::-webkit-scrollbar{display:none}
 .ht-tab{
-  flex:1;padding:.8rem 1rem;
+  flex:1 0 auto;padding:.8rem 1rem;
   font-size:.9rem;font-weight:500;color:var(--text2);text-align:center;
   background:none;border:none;border-bottom:2px solid transparent;
   cursor:pointer;white-space:nowrap;transition:color .15s;font-family:inherit
 }
 .ht-tab:hover{color:var(--text)}
 .ht-tab.active{color:var(--text);border-bottom:3px solid var(--blue);font-weight:600}
+.home-filter-wrap{position:relative;display:flex;flex:0 0 auto}
+.home-filter-btn{
+  width:46px;min-width:46px;border:0;border-left:1px solid var(--border);
+  border-bottom:2px solid transparent;background:var(--bg);color:var(--text2);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:background .15s,color .15s;font-family:inherit;position:relative
+}
+.home-filter-btn:hover,.home-filter-btn.active{background:var(--hover);color:var(--text)}
+.home-filter-btn svg{width:1.15rem;height:1.15rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.home-filter-btn.active::after{
+  content:'';position:absolute;top:.62rem;right:.62rem;width:6px;height:6px;
+  border-radius:50%;background:var(--blue)
+}
+.home-filter-menu{
+  position:absolute;top:calc(100% + .4rem);right:.45rem;z-index:25;
+  width:min(210px,calc(100vw - 1rem));padding:.35rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:8px;
+  box-shadow:0 10px 30px rgba(0,0,0,.16)
+}
+.home-filter-menu button{
+  width:100%;display:flex;align-items:center;justify-content:space-between;gap:.75rem;
+  border:0;background:transparent;color:var(--text);border-radius:6px;
+  padding:.55rem .65rem;font-size:.88rem;font-family:inherit;text-align:left;cursor:pointer
+}
+.home-filter-menu button:hover{background:var(--hover)}
+.home-filter-check{
+  width:1rem;height:1rem;border-radius:50%;border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff
+}
+.home-filter-check.on{background:var(--blue);border-color:var(--blue)}
+.home-filter-check svg{width:.72rem;height:.72rem;fill:currentColor}
 /* Explore search bar */
 .explore-search-bar{
   display:flex;align-items:center;gap:.6rem;
@@ -2256,6 +2292,16 @@ function userStorageGet(key, fallback = null) {
 function userStorageSet(key, value) {
     return storageSet(userScopedStorageKey(key), value);
 }
+const HOME_DISPLAY_KEYS = {
+    showBoosts: 'homeTimelineShowBoosts',
+    showReplies: 'homeTimelineShowReplies',
+    showQuotes: 'homeTimelineShowQuotes',
+};
+const HOME_DISPLAY = {
+    showBoosts: userStorageGet(HOME_DISPLAY_KEYS.showBoosts, '1') !== '0',
+    showReplies: userStorageGet(HOME_DISPLAY_KEYS.showReplies, '1') !== '0',
+    showQuotes: userStorageGet(HOME_DISPLAY_KEYS.showQuotes, '1') !== '0',
+};
 const APP_APPEARANCE = {
     theme: storageGet('appearanceTheme', 'system') || 'system',
     density: storageGet('appearanceDensity', 'comfortable') || 'comfortable',
@@ -2557,7 +2603,7 @@ function renderPoll(poll, statusId) {
 
     const metaBits = [];
     metaBits.push(poll.multiple ? 'Multiple choice' : 'Single choice');
-    metaBits.push(`${totalVotes} voto${totalVotes === 1 ? '' : 's'}`);
+    metaBits.push(`${totalVotes} vote${totalVotes === 1 ? '' : 's'}`);
     if (poll.expires_at && !poll.expired) metaBits.push('Ends ' + timeAgo(poll.expires_at));
     if (poll.expired) metaBits.push('Closed');
     const showResultsByDefault = !canVote;
@@ -2594,7 +2640,7 @@ function renderStatus(s, focal = false) {
     const boostBar = isBoost ? `
         <div class="boost-bar">
             <svg viewBox="0 0 24 24"><path d="M17 1L21 5L17 9V6H7V12H5V6C5 4.9 5.9 4 7 4H17V1ZM7 23L3 19L7 15V18H17V12H19V18C19 19.1 18.1 20 17 20H7V23Z"/></svg>
-            <a onclick="navigate('PROFILE','${escJsSq(s.account.id)}')" style="cursor:pointer">${esc(s.account.display_name || s.account.username)}</a> repostou
+            <a onclick="navigate('PROFILE','${escJsSq(s.account.id)}')" style="cursor:pointer">${esc(s.account.display_name || s.account.username)}</a> reposted
         </div>` : '';
 
     const visMap = {
@@ -2705,10 +2751,10 @@ function renderStatus(s, focal = false) {
                     <button class="action-btn reply-btn" onclick="Compose.openReply('${escJsSq(post.id)}','${escJsSq(acct.acct)}')" title="Reply" aria-label="Reply">
                         <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>${rc}
                     </button>
-                    <button class="action-btn boost-btn${post.reblogged ? ' active' : ''}" onclick="showRepostMenu(event,'${escJsSq(post.id)}',this)" title="Repostar" aria-label="Repostar"${!canBoost ? ' disabled' : ''}>
+                    <button class="action-btn boost-btn${post.reblogged ? ' active' : ''}" onclick="showRepostMenu(event,'${escJsSq(post.id)}',this)" title="Repost" aria-label="Repost"${!canBoost ? ' disabled' : ''}>
                         <svg viewBox="0 0 24 24"><path d="M17 1L21 5L17 9V6H7V12H5V6C5 4.9 5.9 4 7 4H17V1ZM7 23L3 19L7 15V18H17V12H19V18C19 19.1 18.1 20 17 20H7V23Z"/></svg>${bc}
                     </button>
-                    <button class="action-btn fav-btn${post.favourited ? ' active' : ''}" onclick="toggleFav('${escJsSq(post.id)}',this)" title="Gostar" aria-label="Gostar">
+                    <button class="action-btn fav-btn${post.favourited ? ' active' : ''}" onclick="toggleFav('${escJsSq(post.id)}',this)" title="Like" aria-label="Like">
                         <svg viewBox="0 0 24 24"><path d="${favPath}"/></svg>${fc}
                     </button>
                 </div>
@@ -2729,11 +2775,11 @@ function renderNotification(n) {
         follow_request: '<svg viewBox="0 0 24 24"><path d="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>',
     };
     const labels = {
-        mention:        'mencionou-te',
+        mention:        'mentioned you',
         reblog:         'reposted your post',
-        favourite:      'favorited your post',
+        favourite:      'liked your post',
         follow:         'started following you',
-        follow_request: 'pediu para te seguir',
+        follow_request: 'requested to follow you',
     };
     const actorName  = esc(actor.display_name || actor.username);
     const rawExcerpt = n.status ? (n.status.spoiler_text || htmlToPlainText(n.status.content || '')) : '';
@@ -2997,7 +3043,7 @@ function _restoreCachedView(view, id) {
 function setColHeader(t, showBack = false, backAction = 'history.back()') {
     const hdr = document.getElementById('col-header');
     if (showBack) {
-        hdr.innerHTML = `<button id="col-back-btn" onclick="${backAction}" aria-label="Retroceder"><svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg></button><span>${t}</span>`;
+        hdr.innerHTML = `<button id="col-back-btn" onclick="${backAction}" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg></button><span>${t}</span>`;
     } else {
         hdr.textContent = t;
     }
@@ -3010,6 +3056,86 @@ function clearContent() {
     document.getElementById('col-content').innerHTML = '';
     document.getElementById('home-tabs-bar').style.display = 'none';
     document.getElementById('col-header').style.display = '';
+}
+
+function shouldRenderHomeStatus(s) {
+    const post = s?.reblog || s;
+    if (!post) return false;
+    if (!HOME_DISPLAY.showBoosts && s?.reblog) return false;
+    if (!HOME_DISPLAY.showReplies && post.in_reply_to_id) return false;
+    if (!HOME_DISPLAY.showQuotes && post.quote) return false;
+    return true;
+}
+
+function renderHomeStatus(s) {
+    return shouldRenderHomeStatus(s) ? renderStatus(s) : '';
+}
+
+function isHomeDisplayFiltered() {
+    return !HOME_DISPLAY.showBoosts || !HOME_DISPLAY.showReplies || !HOME_DISPLAY.showQuotes;
+}
+
+function updateHomeFilterButton() {
+    const btn = document.getElementById('home-filter-btn');
+    if (!btn) return;
+    const active = isHomeDisplayFiltered();
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
+function renderHomeFilterMenu() {
+    const check = value => value
+        ? '<span class="home-filter-check on"><svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></span>'
+        : '<span class="home-filter-check"></span>';
+    return `
+        <button type="button" onclick="event.stopPropagation();setHomeDisplayFilter('showBoosts', !HOME_DISPLAY.showBoosts)">
+            <span>Show reposts</span>${check(HOME_DISPLAY.showBoosts)}
+        </button>
+        <button type="button" onclick="event.stopPropagation();setHomeDisplayFilter('showReplies', !HOME_DISPLAY.showReplies)">
+            <span>Show replies</span>${check(HOME_DISPLAY.showReplies)}
+        </button>
+        <button type="button" onclick="event.stopPropagation();setHomeDisplayFilter('showQuotes', !HOME_DISPLAY.showQuotes)">
+            <span>Show quotes</span>${check(HOME_DISPLAY.showQuotes)}
+        </button>`;
+}
+
+function toggleHomeFilterMenu(e) {
+    e.stopPropagation();
+    const wrap = e.currentTarget.closest('.home-filter-wrap');
+    if (!wrap) return;
+    const btn = e.currentTarget;
+    const existing = wrap.querySelector('.home-filter-menu');
+    if (existing) {
+        existing.remove();
+        btn.setAttribute('aria-expanded', 'false');
+        return;
+    }
+    document.querySelectorAll('.home-filter-menu').forEach(el => el.remove());
+    const menu = document.createElement('div');
+    menu.className = 'home-filter-menu';
+    menu.innerHTML = renderHomeFilterMenu();
+    menu.addEventListener('click', ev => ev.stopPropagation());
+    wrap.appendChild(menu);
+    btn.setAttribute('aria-expanded', 'true');
+    const close = ev => {
+        if (!menu.contains(ev.target) && !wrap.contains(ev.target)) {
+            menu.remove();
+            btn.setAttribute('aria-expanded', 'false');
+            document.removeEventListener('click', close, true);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', close, true), 0);
+}
+
+function setHomeDisplayFilter(key, value) {
+    if (!Object.prototype.hasOwnProperty.call(HOME_DISPLAY, key)) return;
+    HOME_DISPLAY[key] = !!value;
+    userStorageSet(HOME_DISPLAY_KEYS[key], HOME_DISPLAY[key] ? '1' : '0');
+    [..._pageCache.keys()].forEach(cacheKey => {
+        if (String(cacheKey).startsWith('HOME:')) _pageCache.delete(cacheKey);
+    });
+    updateHomeFilterButton();
+    if (WCFG.view === 'HOME') showHome(_homeTab);
 }
 
 async function loadFeed(endpoint, renderFn, params = {}) {
@@ -3134,8 +3260,8 @@ async function refreshAfterCreate(status) {
         const belongsToCurrentTab =
             _homeTab === 'home' ||
             (_homeTab === 'local' && status.visibility === 'public');
-        if (belongsToCurrentTab) {
-            prependToFeed(renderStatus(status));
+        if (belongsToCurrentTab && shouldRenderHomeStatus(status)) {
+            prependToFeed(renderHomeStatus(status));
             window.scrollTo({top: 0, behavior: 'smooth'});
         }
         Toast.ok('Posted.');
@@ -3185,7 +3311,7 @@ async function showHome(tabId) {
         }
     }
     _pendingPosts = 0; updateNewPostsBtn();
-    setColHeader('Home'); clearContent(); _currentRenderFn = renderStatus;
+    setColHeader('Home'); clearContent(); _currentRenderFn = renderHomeStatus;
     await _renderHomeTabBar();
     addLoadMoreBtn();
     const ep = _homeTab === 'home'       ? '/api/v1/timelines/home'
@@ -3199,7 +3325,7 @@ async function showHome(tabId) {
             ? {remote: true}
             : {};
     _currentEndpointParams = params;
-    await loadFeed(ep, renderStatus, params);
+    await loadFeed(ep, renderHomeStatus, params);
 }
 
 async function _renderHomeTabBar() {
@@ -3219,16 +3345,27 @@ async function _renderHomeTabBar() {
     if (!tabs.some(t => t.id === _homeTab)) {
         _homeTab = 'home';
     }
-    bar.innerHTML = tabs.map(t =>
-        `<button class="ht-tab${_homeTab === t.id ? ' active' : ''}" role="tab"
-            aria-selected="${_homeTab === t.id}"
-            onclick="showHome('${escJsSq(t.id)}')">${esc(t.label)}</button>`
-    ).join('');
+    const active = isHomeDisplayFiltered();
+    bar.innerHTML = `
+        <div class="home-tabs-scroll">
+            ${tabs.map(t =>
+                `<button class="ht-tab${_homeTab === t.id ? ' active' : ''}" role="tab"
+                    aria-selected="${_homeTab === t.id}"
+                    onclick="showHome('${escJsSq(t.id)}')">${esc(t.label)}</button>`
+            ).join('')}
+        </div>
+        <div class="home-filter-wrap">
+            <button id="home-filter-btn" class="home-filter-btn${active ? ' active' : ''}" type="button"
+                aria-label="Timeline display" aria-haspopup="menu" aria-expanded="false"
+                aria-pressed="${active ? 'true' : 'false'}" onclick="toggleHomeFilterMenu(event)">
+                <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+            </button>
+        </div>`;
     bar.style.display = 'flex';
     document.getElementById('col-header').style.display = 'none';
     // Scroll active tab into view (useful when returning from a thread with a list tab active)
     requestAnimationFrame(() => {
-        bar.querySelector('.ht-tab.active')?.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
+        bar.querySelector('.home-tabs-scroll .ht-tab.active')?.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
     });
 }
 
@@ -4969,7 +5106,7 @@ async function savePassword() {
 }
 
 async function showFavourites() {
-    setColHeader('Favorites'); clearContent(); _currentRenderFn = renderStatus;
+    setColHeader('Likes'); clearContent(); _currentRenderFn = renderStatus;
     addLoadMoreBtn();
     await loadFeed('/api/v1/favourites', renderStatus);
 }
@@ -5669,6 +5806,7 @@ function startStreaming() {
             try {
                 const s = JSON.parse(e.data);
                 if (document.querySelector(`.status-card[data-id="${s.id}"]`)) return;
+                if (!shouldRenderHomeStatus(s)) return;
                 _pendingPosts++;
                 updateNewPostsBtn();
             } catch {}
@@ -5917,7 +6055,7 @@ function toggleNavUserMenu(e) {
         </a>
         <a href="#" onclick="event.preventDefault();this.closest('.nav-user-menu').remove();navigate('FAVOURITES')">
             <svg viewBox="0 0 24 24"><path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3z"/></svg>
-            Favorites
+            Likes
         </a>
         <a href="#" onclick="event.preventDefault();this.closest('.nav-user-menu').remove();navigate('BOOKMARKS')">
             <svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
@@ -6650,7 +6788,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') { Compose.close(); Lightbox.close(); }
+        if (e.key === 'Escape') {
+            Compose.close(); Lightbox.close();
+            document.querySelectorAll('.home-filter-menu').forEach(el => el.remove());
+            document.getElementById('home-filter-btn')?.setAttribute('aria-expanded', 'false');
+        }
         const notTyping = !e.ctrlKey && !e.metaKey && !e.target.matches('input,textarea,select,button');
         if (!notTyping) return;
         if (e.key === 'n') { Compose.open(); return; }

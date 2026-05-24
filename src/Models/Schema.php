@@ -8,7 +8,7 @@ class Schema
     private static bool $done = false;
 
     /** Increment this when adding new tables or columns. */
-    public const SCHEMA_VERSION = 27;
+    public const SCHEMA_VERSION = 28;
 
     public static function install(): void
     {
@@ -168,6 +168,7 @@ class Schema
             following_id TEXT NOT NULL,
             pending      INTEGER NOT NULL DEFAULT 0,
             local        INTEGER NOT NULL DEFAULT 1,
+            show_reblogs INTEGER NOT NULL DEFAULT 1,
             created_at   TEXT NOT NULL,
             UNIQUE(follower_id, following_id)
         )");
@@ -176,6 +177,7 @@ class Schema
         $db->exec("CREATE INDEX IF NOT EXISTS idx_follows_fwing ON follows(following_id)");
 
         try { $db->exec("ALTER TABLE follows ADD COLUMN notify INTEGER NOT NULL DEFAULT 0"); } catch (\Throwable) {}
+        try { $db->exec("ALTER TABLE follows ADD COLUMN show_reblogs INTEGER NOT NULL DEFAULT 1"); } catch (\Throwable) {}
 
         $db->exec("CREATE TABLE IF NOT EXISTS favourites (
             id         TEXT PRIMARY KEY,
@@ -667,6 +669,8 @@ class Schema
         self::ensureDeliveryLogTables($db);
         self::ensureQuoteAuthorizationTables($db);
         self::ensureLoginAttemptTables($db);
+        try { $db->exec("ALTER TABLE follows ADD COLUMN notify INTEGER NOT NULL DEFAULT 0"); } catch (\Throwable) {}
+        try { $db->exec("ALTER TABLE follows ADD COLUMN show_reblogs INTEGER NOT NULL DEFAULT 1"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_of_id TEXT"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN quote_policy TEXT NOT NULL DEFAULT 'public'"); } catch (\Throwable) {}
         try { $db->exec("ALTER TABLE statuses ADD COLUMN idempotency_key TEXT"); } catch (\Throwable) {}
@@ -875,6 +879,7 @@ class Schema
         if (!self::hasColumn($db, 'statuses', 'quote_policy')) return false;
         if (!self::hasColumn($db, 'statuses', 'title')) return false;
         if (!self::hasColumn($db, 'statuses', 'expires_at')) return false;
+        if (!self::hasColumn($db, 'follows', 'show_reblogs')) return false;
         if (!self::hasTable($db, 'quote_authorizations')) return false;
         if (!self::hasColumn($db, 'inbox_log', 'disposition')) return false;
         return true;

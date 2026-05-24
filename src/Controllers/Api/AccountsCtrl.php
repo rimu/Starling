@@ -863,10 +863,15 @@ use App\ActivityPub\{Builder, Delivery};
             err_out('Not found', 404);
         }
 
-        $d      = req_body();
-        $notify = (int)bool_val($d['notify'] ?? false);
+        $d = req_body();
+        $hasNotify = array_key_exists('notify', $d) || array_key_exists('notify', $_GET);
+        $notifyInput = array_key_exists('notify', $d) ? $d['notify'] : ($_GET['notify'] ?? false);
+        $notify = $hasNotify ? (int)bool_val($notifyInput) : 0;
+        $hasReblogs = array_key_exists('reblogs', $d) || array_key_exists('reblogs', $_GET);
+        $reblogsInput = array_key_exists('reblogs', $d) ? $d['reblogs'] : ($_GET['reblogs'] ?? true);
+        $showReblogs = $hasReblogs ? (int)bool_val($reblogsInput) : 1;
 
-        $exists = DB::one('SELECT pending, notify FROM follows WHERE follower_id=? AND following_id=?', [$viewer['id'], $targetId]);
+        $exists = DB::one('SELECT pending, notify, show_reblogs FROM follows WHERE follower_id=? AND following_id=?', [$viewer['id'], $targetId]);
         if (!$exists) {
             $isLocked = $local ? (int)$local['is_locked'] : (int)$remote['is_locked'];
             $pending  = $isLocked ? 1 : 0;
@@ -877,6 +882,7 @@ use App\ActivityPub\{Builder, Delivery};
                 'following_id'=> $targetId,
                 'pending'     => $pending,
                 'notify'      => $notify,
+                'show_reblogs'=> $showReblogs,
                 'local'       => $local ? 1 : 0,
                 'created_at'  => now_iso(),
             ]);
@@ -906,9 +912,17 @@ use App\ActivityPub\{Builder, Delivery};
                 Delivery::queueToActor($viewer, $remote, $followActivity);
             }
         } else {
-            // Follow already exists — update notify flag if changed
-            if ((int)$exists['notify'] !== $notify) {
-                DB::update('follows', ['notify' => $notify], 'follower_id=? AND following_id=?', [$viewer['id'], $targetId]);
+            // Follow already exists: Mastodon clients may call this endpoint to adjust
+            // per-follow preferences without changing the relationship itself.
+            $updates = [];
+            if ($hasNotify && (int)$exists['notify'] !== $notify) {
+                $updates['notify'] = $notify;
+            }
+            if ($hasReblogs && (int)$exists['show_reblogs'] !== $showReblogs) {
+                $updates['show_reblogs'] = $showReblogs;
+            }
+            if ($updates) {
+                DB::update('follows', $updates, 'follower_id=? AND following_id=?', [$viewer['id'], $targetId]);
             }
         }
 
@@ -1219,13 +1233,17 @@ use App\ActivityPub\{Builder, Delivery};
             }
         }
 
-        $activeFollow = DB::one('SELECT notify FROM follows WHERE follower_id=? AND following_id=? AND pending=0', [$vid, $internalId]);
+        $followRow = DB::one(
+            'SELECT pending, notify, show_reblogs FROM follows WHERE follower_id=? AND following_id=?',
+            [$vid, $internalId]
+        );
+        $activeFollow = $followRow && (int)$followRow['pending'] === 0;
 
         return [
             'id'                   => (string)$clientId,   // always the masto_id the client knows
-            'following'            => $activeFollow !== null,
-            'showing_reblogs'      => true,
-            'notifying'            => $activeFollow ? (bool)$activeFollow['notify'] : false,
+            'following'            => (bool)$activeFollow,
+            'showing_reblogs'      => $followRow ? (bool)$followRow['show_reblogs'] : false,
+            'notifying'            => $activeFollow ? (bool)$followRow['notify'] : false,
             'languages'            => [],
             'followed_by'          => (bool)DB::one('SELECT 1 FROM follows WHERE follower_id=? AND following_id=? AND pending=0', [$internalId, $vid]),
             'blocking'             => (bool)DB::one('SELECT 1 FROM blocks WHERE user_id=? AND target_id=?', [$vid, $internalId]),

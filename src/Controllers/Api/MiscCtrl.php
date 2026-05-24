@@ -783,16 +783,17 @@ class FollowRequestsCtrl
             }
         }
 
-        $activeFollow = DB::one(
-            'SELECT notify FROM follows WHERE follower_id=? AND following_id=? AND pending=0',
+        $followRow = DB::one(
+            'SELECT pending, notify, show_reblogs FROM follows WHERE follower_id=? AND following_id=?',
             [$viewerId, $internalId]
         );
+        $activeFollow = $followRow && (int)$followRow['pending'] === 0;
 
         return [
             'id'                   => $clientId,
-            'following'            => $activeFollow !== null,
-            'showing_reblogs'      => true,
-            'notifying'            => $activeFollow ? (bool)$activeFollow['notify'] : false,
+            'following'            => (bool)$activeFollow,
+            'showing_reblogs'      => $followRow ? (bool)$followRow['show_reblogs'] : false,
+            'notifying'            => $activeFollow ? (bool)$followRow['notify'] : false,
             'languages'            => [],
             'followed_by'          => (bool)DB::one('SELECT 1 FROM follows WHERE follower_id=? AND following_id=? AND pending=0', [$internalId, $viewerId]),
             'blocking'             => (bool)DB::one('SELECT 1 FROM blocks WHERE user_id=? AND target_id=?', [$viewerId, $internalId]),
