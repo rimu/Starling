@@ -586,8 +586,8 @@ class AdminModel
         $affectedStatusIds = array_values(array_unique(array_filter(array_merge(
             array_column(DB::all('SELECT status_id FROM favourites WHERE user_id=?', [$id]), 'status_id'),
             array_column(DB::all('SELECT status_id FROM reblogs WHERE user_id=?', [$id]), 'status_id'),
-            array_column(DB::all('SELECT reply_to_id FROM statuses WHERE user_id=? AND reply_to_id IS NOT NULL AND reply_to_id<>""', [$id]), 'reply_to_id'),
-            array_column(DB::all('SELECT reblog_of_id FROM statuses WHERE user_id=? AND reblog_of_id IS NOT NULL AND reblog_of_id<>""', [$id]), 'reblog_of_id')
+            array_column(DB::all("SELECT reply_to_id FROM statuses WHERE user_id=? AND reply_to_id IS NOT NULL AND reply_to_id<>''", [$id]), 'reply_to_id'),
+            array_column(DB::all("SELECT reblog_of_id FROM statuses WHERE user_id=? AND reblog_of_id IS NOT NULL AND reblog_of_id<>''", [$id]), 'reblog_of_id')
         ))));
         $mediaRows = DB::all('SELECT url, preview_url FROM media_attachments WHERE user_id=?', [$id]);
         $statusIds = array_column(DB::all('SELECT id FROM statuses WHERE user_id=?', [$id]), 'id');

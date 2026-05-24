@@ -9,7 +9,7 @@ class UserModel
 
     private static function activeLocalStatusCond(): string
     {
-        return 'user_id=? AND local=1 AND (expires_at IS NULL OR expires_at="" OR expires_at>?)';
+        return "user_id=? AND local=1 AND (expires_at IS NULL OR expires_at='' OR expires_at>?)";
     }
 
     private static function byActorUrl(string $actorUrl): ?array
