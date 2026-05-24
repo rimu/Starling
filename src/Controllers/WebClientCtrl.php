@@ -655,7 +655,7 @@ class WebClientCtrl
             'myId'          => $user['id'],
             'myUsername'    => $user['username'],
             'myDisplayName' => $user['display_name'] ?: $user['username'],
-            'myAvatar'      => local_media_url_or_fallback($user['avatar'] ?? '', '/img/avatar.svg'),
+            'myAvatar'      => local_media_url_or_fallback($user['avatar'] ?? '', '/img/avatar.png'),
             'isAdmin'       => (bool)$user['is_admin'],
             'webCsrf'       => $_SESSION['web_csrf'] ?? '',
             'postChars'     => AP_POST_CHARS,
@@ -1728,11 +1728,13 @@ button{font-family:inherit}
 .focal-stat-link:hover{text-decoration:underline}
 .follow-btn:hover{opacity:.8}
 .follow-btn:disabled{opacity:.5;cursor:default}
-.profile-link{
-  font-size:.8rem;color:var(--text3);border:none;background:none;
-  padding:.3rem 0;text-decoration:none
+.profile-public-btn{
+  display:flex;align-items:center;justify-content:center;width:2.2rem;height:2.2rem;
+  border-radius:50%;border:1.5px solid var(--border);background:transparent;
+  cursor:pointer;color:var(--text);transition:background .15s,color .15s,border-color .15s
 }
-.profile-link:hover{color:var(--blue);text-decoration:underline}
+.profile-public-btn:hover{background:var(--hover);color:var(--blue);border-color:color-mix(in srgb,var(--blue) 35%,var(--border))}
+.profile-public-btn svg{width:1.1rem;height:1.1rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
 /* Search */
 .search-box{
@@ -2265,6 +2267,7 @@ const USERPREFS = {
     defaultLanguage: null,
     defaultExpireAfter: null,
 };
+let SETTINGS_LOADS = {};
 let _pendingExploreQuery = '';
 function storageGet(key, fallback = null) {
     try {
@@ -2318,6 +2321,22 @@ const escJsSq = s => String(s ?? '')
     .replace(/\n/g, '\\n')
     .replace(/</g, '\\x3C')
     .replace(/>/g, '\\x3E');
+const DEFAULT_AVATAR_URL = '/img/avatar.png';
+const DEFAULT_HEADER_URL = '/img/header.png';
+
+function mediaUrlOrFallback(value, fallback) {
+    const url = String(value || '').trim();
+    if (!url || /missing\.png(?:[?#].*)?$/i.test(url)) return fallback;
+    return url;
+}
+
+function avatarAttrs(value) {
+    return `src="${esc(mediaUrlOrFallback(value, DEFAULT_AVATAR_URL))}" onerror="this.onerror=null;this.src='${DEFAULT_AVATAR_URL}'"`;
+}
+
+function headerAttrs(value) {
+    return `src="${esc(mediaUrlOrFallback(value, DEFAULT_HEADER_URL))}" onerror="this.onerror=null;this.src='${DEFAULT_HEADER_URL}'"`;
+}
 
 function prefBool(v) {
     return v === true || v === 1 || v === '1' || v === 'true';
@@ -2362,13 +2381,30 @@ async function loadReadingPrefs() {
     } catch {}
 }
 
+function compactDuration(seconds) {
+    const value = Math.max(0, Math.round(Number(seconds) || 0));
+    if (value < 60)     return value + 's';
+    if (value < 3600)   return Math.round(value / 60) + 'm';
+    if (value < 86400)  return Math.round(value / 3600) + 'h';
+    if (value < 604800) return Math.round(value / 86400) + 'd';
+    return Math.round(value / 604800) + 'w';
+}
+
 function timeAgo(iso) {
-    const d = new Date(iso), diff = (Date.now() - d) / 1000;
-    if (diff < 60)     return Math.round(diff) + 's';
-    if (diff < 3600)   return Math.round(diff / 60) + 'm';
-    if (diff < 86400)  return Math.round(diff / 3600) + 'h';
-    if (diff < 604800) return Math.round(diff / 86400) + 'd';
-    return d.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+    const ts = Date.parse(iso);
+    if (!Number.isFinite(ts)) return '';
+    const diff = Math.round((Date.now() - ts) / 1000);
+    if (diff < 0) return 'in ' + compactDuration(-diff);
+    if (diff < 604800) return compactDuration(diff);
+    return new Date(ts).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+}
+
+function expiryText(iso) {
+    const ts = Date.parse(iso);
+    if (!Number.isFinite(ts)) return 'Temporary';
+    const remaining = Math.round((ts - Date.now()) / 1000);
+    if (remaining <= 0) return 'Expired';
+    return 'Deletes in ' + compactDuration(remaining);
 }
 
 function formatDate(iso) {
@@ -2566,7 +2602,7 @@ function renderQuote(quote) {
     const titleHtml = quoted.title ? `<div class="quote-title">${esc(quoted.title)}</div>` : '';
     return `<div class="quote-card" onclick="event.stopPropagation();if(event.target.closest('a,button,input,textarea,select,label'))return;navigate('THREAD','${escJsSq(quoted.id)}')">
         <div class="quote-head">
-            <img class="quote-avatar" src="${esc(acct.avatar)}" alt="" loading="lazy">
+            <img class="quote-avatar" ${avatarAttrs(acct.avatar || acct.avatar_static)} alt="" loading="lazy">
             <div class="quote-meta"><strong>${esc(acct.display_name || acct.username)}</strong><span>@${esc(acct.acct)}</span></div>
         </div>
         ${titleHtml}
@@ -2655,7 +2691,7 @@ function renderStatus(s, focal = false) {
             Temporary
         </span>` : '';
     const temporaryMeta = post.expires_at
-        ? `<span class="status-temporary-note" title="Deletes ${esc(formatDate(post.expires_at))}">Deletes ${timeAgo(post.expires_at)}</span>`
+        ? `<span class="status-temporary-note" title="Deletes ${esc(formatDate(post.expires_at))}">${esc(expiryText(post.expires_at))}</span>`
         : '';
 
     const hasCW = !!post.spoiler_text;
@@ -2719,7 +2755,7 @@ function renderStatus(s, focal = false) {
         ${boostBar}
         <div class="status-inner">
             <div class="status-left">
-                <img class="avatar" src="${esc(acct.avatar)}" alt="" loading="lazy" onclick="navigate('PROFILE','${escJsSq(acct.id)}')" title="@${esc(acct.acct)}">
+                <img class="avatar" ${avatarAttrs(acct.avatar || acct.avatar_static)} alt="" loading="lazy" onclick="navigate('PROFILE','${escJsSq(acct.id)}')" title="@${esc(acct.acct)}">
             </div>
             <div class="status-body">
                 <div class="status-header">
@@ -2800,7 +2836,7 @@ function renderNotification(n) {
     <div class="notif-card notif-type-${esc(type)}"${cardClick}>
         <div class="notif-icon">${icons[type] || ''}</div>
         <div class="notif-main">
-            <img class="notif-avatar" src="${esc(actor.avatar)}" alt="" onclick="navigate('PROFILE','${escJsSq(actor.id)}')">
+            <img class="notif-avatar" ${avatarAttrs(actor.avatar || actor.avatar_static)} alt="" onclick="navigate('PROFILE','${escJsSq(actor.id)}')">
             <div class="notif-body">
                 <div class="notif-head">
                     <strong class="notif-name" onclick="navigate('PROFILE','${escJsSq(actor.id)}')">${actorName}</strong>
@@ -2823,8 +2859,7 @@ function handleNotificationCardClick(event, statusId) {
 // ── Render: profile header ─────────────────────────────────────────────────
 function renderProfileHeader(account, rel) {
     const isOwn      = account.id === WCFG.myId;
-    const banner     = account.header && !account.header.includes('missing.png')
-        ? `<img src="${esc(account.header)}" alt="" loading="lazy">` : '';
+    const banner     = `<img ${headerAttrs(account.header || account.header_static)} alt="" loading="lazy">`;
     const isFollowing = rel?.following ?? false;
     const isRequested = rel?.requested ?? false;
     const isNotifying = rel?.notifying ?? false;
@@ -2868,7 +2903,7 @@ function renderProfileHeader(account, rel) {
         <div class="profile-banner">${banner}</div>
         <div class="profile-meta">
             <div class="profile-avatar-wrap">
-                <img class="profile-avatar" src="${esc(account.avatar)}" alt="">
+                <img class="profile-avatar" ${avatarAttrs(account.avatar || account.avatar_static)} alt="">
             </div>
             <div class="profile-name">${esc(account.display_name || account.username)}</div>
             <div class="profile-acct">@${esc(account.acct)}${!isOwn && rel?.followed_by ? '<span class="follows-you-badge">Follows you</span>' : ''}</div>
@@ -2884,7 +2919,9 @@ function renderProfileHeader(account, rel) {
                 ${notifyBtn}
                 ${listsBtn}
                 ${dmBtn}
-                <a class="profile-link" href="${esc(account.url)}" target="_blank" rel="noopener">View public profile ↗</a>
+                <a class="profile-public-btn" href="${esc(account.url)}" target="_blank" rel="noopener" title="View public profile" aria-label="View public profile">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                </a>
             </div>
         </div>
         <div class="profile-tabs">
@@ -2900,7 +2937,7 @@ function renderProfileHeader(account, rel) {
 function renderAccount(a) {
     return `
     <div class="account-card">
-        <img src="${esc(a.avatar)}" alt="" onclick="navigate('PROFILE','${escJsSq(a.id)}')">
+        <img ${avatarAttrs(a.avatar || a.avatar_static)} alt="" onclick="navigate('PROFILE','${escJsSq(a.id)}')">
         <div class="account-card-info">
             <div class="account-card-name" onclick="navigate('PROFILE','${escJsSq(a.id)}')">${esc(a.display_name || a.username)}</div>
             <div class="account-card-acct">@${esc(a.acct)}</div>
@@ -3663,7 +3700,7 @@ function renderConversation(conv) {
     return `
     <div class="conv-card" onclick="navigate('THREAD','${escJsSq(conv.last_status?.id ?? conv.id)}')">
         <div class="conv-avatar-wrap">
-            <img class="avatar" src="${esc(acct.avatar)}" alt="" loading="lazy">
+            <img class="avatar" ${avatarAttrs(acct.avatar || acct.avatar_static)} alt="" loading="lazy">
             ${conv.unread ? '<span class="conv-unread-dot"></span>' : ''}
         </div>
         <div class="conv-body">
@@ -3679,6 +3716,7 @@ function renderConversation(conv) {
 async function showSettings() {
     setColHeader('Settings'); clearContent();
     const col = document.getElementById('col-content');
+    SETTINGS_LOADS = {};
 
     const localTabOn = userStorageGet('showLocalTab', '0') === '1';
     const federatedTabOn = userStorageGet('showFederatedTab', '0') === '1';
@@ -3686,26 +3724,12 @@ async function showSettings() {
 
     let account = null;
     let prefs = {};
-    let notifPolicy = null;
-    let mutedAccounts = [];
-    let blockedAccounts = [];
-    let blockedDomains = [];
-    let filters = [];
-    let sessions = [];
-    let twoFactor = {enabled:false,pending_setup:false,recovery_codes_remaining:0,method:null};
-    let aliases = [];
-    let developer = {apps: [], tokens: []};
-    try { account = await Api.get('/api/v1/accounts/verify_credentials'); } catch {}
-    try { prefs = await Api.get('/api/v1/preferences'); } catch {}
-    try { notifPolicy = await Api.get('/api/v1/notifications/policy'); } catch {}
-    try { mutedAccounts = await Api.get('/api/v1/mutes'); } catch {}
-    try { blockedAccounts = await Api.get('/api/v1/blocks'); } catch {}
-    try { blockedDomains = await Api.get('/api/v1/domain_blocks'); } catch {}
-    try { filters = await Api.get('/api/v1/filters'); } catch {}
-    try { sessions = await Api.get('/api/v1/sessions'); } catch {}
-    try { twoFactor = await Api.get('/api/v1/accounts/2fa'); } catch {}
-    try { aliases = await Api.get('/api/v1/accounts/aliases'); } catch {}
-    try { developer = await Api.get('/api/v1/developer/apps'); } catch {}
+    const initial = await Promise.allSettled([
+        Api.get('/api/v1/accounts/verify_credentials'),
+        Api.get('/api/v1/preferences'),
+    ]);
+    if (initial[0].status === 'fulfilled') account = initial[0].value;
+    if (initial[1].status === 'fulfilled') prefs = initial[1].value || {};
     const defVis = prefs['posting:default:visibility'] ?? 'public';
     const defSensitive = prefBool(prefs['posting:default:sensitive']);
     const defLanguage = prefs['posting:default:language'] ?? '';
@@ -3716,8 +3740,7 @@ async function showSettings() {
     const isLocked = prefBool(account?.locked);
     const isDiscoverable = prefBool(account?.discoverable);
     const isIndexable = !prefBool(account?.noindex);
-    const webSessions = sessions.filter(session => (session.app_name || '') === 'Web Client');
-    const authorizedApps = sessions.filter(session => (session.app_name || '') !== 'Web Client');
+    const loadingRow = label => `<div class="settings-empty" data-settings-loading="1">${label}</div>`;
 
     const visOpts = ['public','unlisted','private','direct']
         .map(v => `<option value="${v}"${defVis===v?' selected':''}>${{public:'🌐 Public',unlisted:'🔒 Unlisted',private:'👥 Followers only',direct:'✉️ Direct'}[v]}</option>`)
@@ -3736,120 +3759,6 @@ async function showSettings() {
     const defaultHomeOpts = ['home', 'trending', 'local', 'federated']
         .map(v => `<option value="${v}"${defaultHomeTab===v?' selected':''}>${({home:'Home',trending:'Trending',local:'Local',federated:'Federated'})[v]}</option>`)
         .join('');
-    const policySelect = (id, value) => `
-        <select id="${id}" class="settings-select">
-            <option value="accept"${value==='accept'?' selected':''}>Allow</option>
-            <option value="filter"${value==='filter'?' selected':''}>Filter</option>
-        </select>`;
-    const accountChip = (acct, mode) => `<div class="settings-chip-row">
-        <div>
-            <div class="settings-label" style="color:var(--text);font-weight:700">${esc(acct.display_name || acct.username)}</div>
-            <div class="settings-label">@${esc(acct.acct || acct.username)}</div>
-        </div>
-        <button class="settings-chip-remove" type="button" onclick="${mode === 'mute' ? `removeMutedAccount('${escJsSq(acct.id)}')` : `removeBlockedAccount('${escJsSq(acct.id)}')`}">
-            ${mode === 'mute' ? 'Unmute' : 'Unblock'}
-        </button>
-    </div>`;
-    const domainRows = blockedDomains.length
-        ? blockedDomains.map(domain => `<div class="settings-chip-row">
-            <div class="settings-label" style="color:var(--text)">${esc(domain)}</div>
-            <button class="settings-chip-remove" type="button" onclick="removeDomainBlock('${escJsSq(domain)}')">Remove</button>
-        </div>`).join('')
-        : '<div class="settings-empty">No blocked domains.</div>';
-    const filterRows = filters.length
-        ? filters.map(filter => {
-            const kws = (filter.keywords || []).map(k => k.keyword).join(', ');
-            const contexts = (filter.context || []).join(', ');
-            const ww = (filter.keywords || []).some(k => k.whole_word);
-            return `<div class="settings-panel">
-                <div class="settings-panel-head">
-                    <div style="min-width:0;flex:1">
-                        <div class="settings-panel-title">${esc(filter.title || kws || 'Filter')}</div>
-                        <div class="settings-panel-meta">${esc(kws || 'No keywords')}</div>
-                        <div class="settings-panel-meta">Action: ${esc(filter.filter_action || 'warn')} · Context: ${esc(contexts || 'home')}</div>
-                        <div class="settings-pill-row">${ww ? '<span class="settings-pill">Whole-word matching</span>' : ''}</div>
-                    </div>
-                    <div style="display:flex;flex-direction:column;gap:.5rem;align-items:flex-end">
-                        <button class="settings-chip-remove" type="button" onclick="loadFilterIntoForm('${escJsSq(filter.id)}')">Edit</button>
-                        <button class="settings-chip-remove" type="button" onclick="removeFilter('${escJsSq(filter.id)}')">Delete</button>
-                    </div>
-                </div>
-            </div>`;
-        }).join('')
-        : '<div class="settings-empty">No keyword filters.</div>';
-    const webSessionRows = webSessions.length
-        ? webSessions.map(session => `<div class="settings-panel">
-            <div class="settings-panel-head">
-                <div style="min-width:0;flex:1">
-                    <div class="settings-panel-title">${esc(session.app_name || 'Web Client')}${session.current ? ' · Current session' : ''}</div>
-                    <div class="settings-panel-meta">${esc(session.token_hint || '')}</div>
-                    <div class="settings-panel-meta">Created ${esc(timeAgo(session.created_at))}${session.last_used_at ? ' · Active ' + esc(timeAgo(session.last_used_at)) : ''}</div>
-                    ${session.app_website ? `<div class="settings-panel-meta">${esc(session.app_website)}</div>` : ''}
-                    <div class="settings-pill-row">${(session.scopes || []).map(scope => `<span class="settings-pill">${esc(scope)}</span>`).join('')}</div>
-                </div>
-                ${session.current
-                    ? `<button class="settings-chip-remove danger" type="button" onclick="revokeCurrentSession()">Sign out</button>`
-                    : `<button class="settings-chip-remove" type="button" onclick="revokeSession('${escJsSq(session.id)}')">Revoke</button>`}
-            </div>
-        </div>`).join('')
-        : '<div class="settings-empty">No active web sessions.</div>';
-    const authorizedAppRows = authorizedApps.length
-        ? authorizedApps.map(session => `<div class="settings-panel">
-            <div class="settings-panel-head">
-                <div style="min-width:0;flex:1">
-                    <div class="settings-panel-title">${esc(session.app_name || 'Authorized application')}</div>
-                    <div class="settings-panel-meta">${esc(session.token_hint || '')}</div>
-                    <div class="settings-panel-meta">Created ${esc(timeAgo(session.created_at))}${session.last_used_at ? ' · Active ' + esc(timeAgo(session.last_used_at)) : ''}</div>
-                    ${session.app_website ? `<div class="settings-panel-meta">${esc(session.app_website)}</div>` : ''}
-                    <div class="settings-pill-row">${(session.scopes || []).map(scope => `<span class="settings-pill">${esc(scope)}</span>`).join('')}</div>
-                </div>
-                <button class="settings-chip-remove" type="button" onclick="revokeSession('${escJsSq(session.id)}')">Revoke</button>
-            </div>
-        </div>`).join('')
-        : '<div class="settings-empty">No authorized applications.</div>';
-    const aliasRows = aliases.length
-        ? aliases.map(acct => `<div class="settings-chip-row">
-            <div>
-                <div class="settings-label" style="color:var(--text);font-weight:700">${esc(acct.display_name || acct.username)}</div>
-                <div class="settings-label">@${esc(acct.acct || acct.username)}</div>
-            </div>
-            <button class="settings-chip-remove" type="button" onclick="removeMigrationAlias('${escJsSq(acct.acct || '')}')">Remove</button>
-        </div>`).join('')
-        : '<div class="settings-empty">No migration aliases.</div>';
-    const developerAppRows = developer.apps?.length
-        ? developer.apps.map(app => `<div class="settings-panel">
-            <div class="settings-panel-head">
-                <div style="min-width:0;flex:1">
-                    <div class="settings-panel-title">${esc(app.name)}</div>
-                    <div class="settings-panel-meta">Redirect URI: ${esc(app.redirect_uri || 'urn:ietf:wg:oauth:2.0:oob')}</div>
-                    ${app.website ? `<div class="settings-panel-meta">${esc(app.website)}</div>` : ''}
-                    <div class="settings-pill-row">${(app.scopes || []).map(scope => `<span class="settings-pill">${esc(scope)}</span>`).join('')}</div>
-                    <div class="settings-secret"><strong>Client ID</strong><br>${esc(app.client_id || '')}</div>
-                    <div class="settings-secret"><strong>Client secret</strong><br>${esc(app.client_secret || '')}</div>
-                </div>
-                <div style="display:flex;flex-direction:column;gap:.5rem;align-items:flex-end">
-                    <button class="settings-chip-remove" type="button" onclick="copyDeveloperSecret('${escJsSq(app.client_id || '')}','Client ID copied.')">Copy ID</button>
-                    <button class="settings-chip-remove" type="button" onclick="copyDeveloperSecret('${escJsSq(app.client_secret || '')}','Client secret copied.')">Copy secret</button>
-                    <button class="settings-chip-remove" type="button" onclick="prefillDeveloperTokenForm('${escJsSq(app.id)}')">New token</button>
-                    <button class="settings-chip-remove danger" type="button" onclick="deleteDeveloperApp('${escJsSq(app.id)}')">Delete app</button>
-                </div>
-            </div>
-        </div>`).join('')
-        : '<div class="settings-empty">No developer applications yet.</div>';
-    const developerTokenRows = developer.tokens?.length
-        ? developer.tokens.map(token => `<div class="settings-panel">
-            <div class="settings-panel-head">
-                <div style="min-width:0;flex:1">
-                    <div class="settings-panel-title">${esc(token.app_name || 'Application token')}</div>
-                    <div class="settings-panel-meta">${esc(token.token_hint || '')}</div>
-                    <div class="settings-panel-meta">Created ${esc(timeAgo(token.created_at))}${token.last_used_at ? ' · Active ' + esc(timeAgo(token.last_used_at)) : ''}</div>
-                    <div class="settings-pill-row">${(token.scopes || []).map(scope => `<span class="settings-pill">${esc(scope)}</span>`).join('')}</div>
-                </div>
-                <button class="settings-chip-remove danger" type="button" onclick="revokeDeveloperToken('${escJsSq(token.id)}')">Revoke</button>
-            </div>
-        </div>`).join('')
-        : '<div class="settings-empty">No personal access tokens created here.</div>';
-
     col.innerHTML = `
     <div class="settings-section">
         <h2 class="settings-title">Profile</h2>
@@ -3965,31 +3874,7 @@ async function showSettings() {
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Notifications</h2>
-        <div class="settings-row">
-            <label class="settings-label">People you do not follow</label>
-            ${policySelect('notif-not-following', notifPolicy?.for_not_following || 'accept')}
-        </div>
-        <div class="settings-row">
-            <label class="settings-label">People who do not follow you</label>
-            ${policySelect('notif-not-followers', notifPolicy?.for_not_followers || 'accept')}
-        </div>
-        <div class="settings-row">
-            <label class="settings-label">New accounts</label>
-            ${policySelect('notif-new-accounts', notifPolicy?.for_new_accounts || 'accept')}
-        </div>
-        <div class="settings-row">
-            <label class="settings-label">Private mentions</label>
-            ${policySelect('notif-private-mentions', notifPolicy?.for_private_mentions || 'accept')}
-        </div>
-        <div class="settings-row">
-            <label class="settings-label">Limited accounts</label>
-            ${policySelect('notif-limited-accounts', notifPolicy?.for_limited_accounts || 'accept')}
-        </div>
-        <div class="settings-row">
-            <span class="settings-label">Pending filtered notifications</span>
-            <span class="settings-label" style="color:var(--text)">${esc(notifPolicy?.summary?.pending_notifications_count ?? 0)}</span>
-        </div>
-        <button class="settings-save-btn" onclick="saveNotificationSettings()">Save notification settings</button>
+        <div id="settings-notifications-box">${loadingRow('Loading notification settings...')}</div>
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Privacy and reach</h2>
@@ -4021,19 +3906,19 @@ async function showSettings() {
         </div>
         <div class="settings-actions-row">
             <button class="settings-save-btn" type="button" onclick="addAccountRestriction('mute')">Mute account</button>
-            <button class="settings-save-btn" type="button" onclick="addAccountRestriction('block')" style="background:transparent;color:var(--red,#EC4040);border:1px solid var(--border)">Block account</button>
+        <button class="settings-save-btn" type="button" onclick="addAccountRestriction('block')" style="background:transparent;color:var(--red,#EC4040);border:1px solid var(--border)">Block account</button>
         </div>
         <div class="settings-subtitle">Muted accounts</div>
-        <div id="settings-muted-list">${mutedAccounts.length ? mutedAccounts.map(acct => accountChip(acct, 'mute')).join('') : '<div class="settings-empty">No muted accounts.</div>'}</div>
+        <div id="settings-muted-list">${loadingRow('Loading muted accounts...')}</div>
         <div class="settings-subtitle">Blocked accounts</div>
-        <div id="settings-blocked-list">${blockedAccounts.length ? blockedAccounts.map(acct => accountChip(acct, 'block')).join('') : '<div class="settings-empty">No blocked accounts.</div>'}</div>
+        <div id="settings-blocked-list">${loadingRow('Loading blocked accounts...')}</div>
         <div class="settings-subtitle">Blocked domains</div>
         <div class="settings-row">
             <label class="settings-label">Domain</label>
             <input type="text" id="set-domain-block" class="settings-input" placeholder="example.org" spellcheck="false">
         </div>
         <button class="settings-save-btn" type="button" onclick="addDomainBlock()">Block domain</button>
-        <div id="settings-domain-blocks">${domainRows}</div>
+        <div id="settings-domain-blocks">${loadingRow('Loading blocked domains...')}</div>
         <div class="settings-subtitle">Keyword filters</div>
         <div class="settings-row">
             <label class="settings-label">Title</label>
@@ -4069,16 +3954,16 @@ async function showSettings() {
             <button class="settings-save-btn" type="button" onclick="saveKeywordFilter()">Save filter</button>
             <button class="settings-save-btn" type="button" onclick="resetFilterForm()" style="background:transparent;color:var(--blue);border:1px solid var(--border)">Clear form</button>
         </div>
-        <div id="settings-filters">${filterRows}</div>
+        <div id="settings-filters">${loadingRow('Loading filters...')}</div>
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Authorized applications and sessions</h2>
         <div class="settings-helper">This is access already granted to your account. Revoke old browser sessions separately from third-party application access.</div>
         <div class="settings-subtitle">Web sessions</div>
-        <div id="settings-sessions">${webSessionRows}</div>
+        <div id="settings-sessions">${loadingRow('Loading sessions...')}</div>
         <button class="settings-save-btn" type="button" onclick="revokeOtherSessions()">Sign out other sessions</button>
         <div class="settings-subtitle">Authorized applications</div>
-        <div id="settings-authorized-apps">${authorizedAppRows}</div>
+        <div id="settings-authorized-apps">${loadingRow('Loading authorized applications...')}</div>
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Developer applications</h2>
@@ -4108,13 +3993,12 @@ async function showSettings() {
         </div>
         <button class="settings-save-btn" type="button" onclick="createDeveloperApp()">Create application</button>
         <div class="settings-subtitle">Your applications</div>
-        <div id="settings-developer-apps">${developerAppRows}</div>
+        <div id="settings-developer-apps">${loadingRow('Loading developer applications...')}</div>
         <div class="settings-subtitle">Personal access tokens</div>
         <div class="settings-row">
             <label class="settings-label">Application</label>
             <select id="dev-token-app" class="settings-select">
                 <option value="">Choose an application</option>
-                ${(developer.apps || []).map(app => `<option value="${esc(app.id)}">${esc(app.name)}</option>`).join('')}
             </select>
         </div>
         <div class="settings-row">
@@ -4138,7 +4022,7 @@ async function showSettings() {
                 <button class="settings-chip-remove" type="button" onclick="hideDeveloperTokenBox()">Hide</button>
             </div>
         </div>
-        <div id="settings-developer-tokens">${developerTokenRows}</div>
+        <div id="settings-developer-tokens">${loadingRow('Loading personal access tokens...')}</div>
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Import and export</h2>
@@ -4163,7 +4047,7 @@ async function showSettings() {
             <input type="text" id="set-migration-alias" class="settings-input" placeholder="oldname@oldserver.tld" spellcheck="false">
         </div>
         <button class="settings-save-btn" type="button" onclick="addMigrationAlias()">Add alias</button>
-        <div id="settings-aliases">${aliasRows}</div>
+        <div id="settings-aliases">${loadingRow('Loading aliases...')}</div>
         <div class="settings-subtitle">Move to a different account</div>
         <div class="settings-row">
             <label class="settings-label">New account</label>
@@ -4177,7 +4061,7 @@ async function showSettings() {
     </div>
     <div class="settings-section">
         <h2 class="settings-title">Account security</h2>
-        <div id="settings-2fa-box" class="settings-stack"></div>
+        <div id="settings-2fa-box" class="settings-stack">${loadingRow('Loading two-factor settings...')}</div>
         <div class="settings-subtitle">Password</div>
         <div class="settings-row">
             <label class="settings-label">Current password</label>
@@ -4216,7 +4100,6 @@ async function showSettings() {
             </button>
         </form>
     </div>` : ''}`;
-    renderTwoFactorSettings(twoFactor);
     setupSettingsTabs();
 }
 
@@ -4289,6 +4172,42 @@ async function saveReadingSettings() {
         applyReadingPrefs(nextPrefs);
         Toast.ok('Reading settings saved.');
     } catch (e) { Toast.err('Error: ' + esc(e.message)); }
+}
+
+function renderNotificationSettings(policy = {}) {
+    const root = document.getElementById('settings-notifications-box');
+    if (!root) return;
+    const policySelect = (id, value) => `
+        <select id="${id}" class="settings-select">
+            <option value="accept"${value==='accept'?' selected':''}>Allow</option>
+            <option value="filter"${value==='filter'?' selected':''}>Filter</option>
+        </select>`;
+    root.innerHTML = `
+        <div class="settings-row">
+            <label class="settings-label">People you do not follow</label>
+            ${policySelect('notif-not-following', policy?.for_not_following || 'accept')}
+        </div>
+        <div class="settings-row">
+            <label class="settings-label">People who do not follow you</label>
+            ${policySelect('notif-not-followers', policy?.for_not_followers || 'accept')}
+        </div>
+        <div class="settings-row">
+            <label class="settings-label">New accounts</label>
+            ${policySelect('notif-new-accounts', policy?.for_new_accounts || 'accept')}
+        </div>
+        <div class="settings-row">
+            <label class="settings-label">Private mentions</label>
+            ${policySelect('notif-private-mentions', policy?.for_private_mentions || 'accept')}
+        </div>
+        <div class="settings-row">
+            <label class="settings-label">Limited accounts</label>
+            ${policySelect('notif-limited-accounts', policy?.for_limited_accounts || 'accept')}
+        </div>
+        <div class="settings-row">
+            <span class="settings-label">Pending filtered notifications</span>
+            <span class="settings-label" style="color:var(--text)">${esc(policy?.summary?.pending_notifications_count ?? 0)}</span>
+        </div>
+        <button class="settings-save-btn" onclick="saveNotificationSettings()">Save notification settings</button>`;
 }
 
 async function saveNotificationSettings() {
@@ -4539,7 +4458,62 @@ function activateSettingsTab(groupId) {
     document.querySelectorAll('#col-content .settings-section').forEach(section => {
         section.style.display = section.dataset.settingsGroup === groupId ? '' : 'none';
     });
+    loadSettingsGroup(groupId);
     window.scrollTo({top: 0, behavior: 'auto'});
+}
+
+async function loadSettingsGroup(groupId) {
+    if (!['notifications', 'privacy', 'access', 'migration', 'security'].includes(groupId)) return;
+    if (SETTINGS_LOADS[groupId]) return SETTINGS_LOADS[groupId];
+
+    SETTINGS_LOADS[groupId] = (async () => {
+        try {
+            if (groupId === 'notifications') {
+                renderNotificationSettings(await Api.get('/api/v1/notifications/policy'));
+                return;
+            }
+
+            if (groupId === 'privacy') {
+                const [mutes, blocks, domains, filters] = await Promise.allSettled([
+                    Api.get('/api/v1/mutes'),
+                    Api.get('/api/v1/blocks'),
+                    Api.get('/api/v1/domain_blocks'),
+                    Api.get('/api/v1/filters'),
+                ]);
+                renderAccountRestrictionList('settings-muted-list', mutes.status === 'fulfilled' ? mutes.value : [], 'mute');
+                renderAccountRestrictionList('settings-blocked-list', blocks.status === 'fulfilled' ? blocks.value : [], 'block');
+                renderDomainBlocks(domains.status === 'fulfilled' ? domains.value : []);
+                renderFilters(filters.status === 'fulfilled' ? filters.value : []);
+                return;
+            }
+
+            if (groupId === 'access') {
+                const [sessions, developer] = await Promise.allSettled([
+                    Api.get('/api/v1/sessions'),
+                    Api.get('/api/v1/developer/apps'),
+                ]);
+                renderSessions(sessions.status === 'fulfilled' ? sessions.value : []);
+                const payload = developer.status === 'fulfilled' ? developer.value : {apps: [], tokens: []};
+                renderDeveloperApps(payload.apps || []);
+                renderDeveloperTokens(payload.tokens || []);
+                return;
+            }
+
+            if (groupId === 'migration') {
+                renderAliases(await Api.get('/api/v1/accounts/aliases'));
+                return;
+            }
+
+            if (groupId === 'security') {
+                renderTwoFactorSettings(await Api.get('/api/v1/accounts/2fa'));
+            }
+        } catch (e) {
+            Toast.err('Error loading settings: ' + esc(e.message));
+            SETTINGS_LOADS[groupId] = null;
+        }
+    })();
+
+    return SETTINGS_LOADS[groupId];
 }
 
 async function refreshDeveloperApps() {
@@ -5274,7 +5248,7 @@ async function showExplore(tab) {
             const requested = !!rel.requested && !following;
             const bio = a.note ? a.note.replace(/<[^>]+>/g, '').trim() : '';
             return `<div class="explore-people-item">
-                <img class="explore-people-avatar" src="${esc(a.avatar)}" alt="" loading="lazy" onclick="navigate('PROFILE','${escJsSq(a.id)}')">
+                <img class="explore-people-avatar" ${avatarAttrs(a.avatar || a.avatar_static)} alt="" loading="lazy" onclick="navigate('PROFILE','${escJsSq(a.id)}')">
                 <div class="explore-people-info" onclick="navigate('PROFILE','${escJsSq(a.id)}')">
                     <div class="explore-people-name">${esc(a.display_name || a.username)}</div>
                     <div class="explore-people-acct">@${esc(a.acct)}</div>
@@ -5478,7 +5452,7 @@ function renderMemberRow(account, listId, isMember) {
         : `<button class="member-add" onclick="addListMember('${escJsSq(listId)}','${escJsSq(account.id)}',this)">Add</button>`;
     return `
     <div class="member-row" data-account-id="${esc(account.id)}">
-        <img src="${esc(account.avatar)}" alt="" onclick="navigate('PROFILE','${escJsSq(account.id)}')">
+        <img ${avatarAttrs(account.avatar || account.avatar_static)} alt="" onclick="navigate('PROFILE','${escJsSq(account.id)}')">
         <div class="member-info">
             <div class="member-name" onclick="navigate('PROFILE','${escJsSq(account.id)}')">${esc(account.display_name || account.username)}</div>
             <div class="member-acct">@${esc(account.acct)}</div>
@@ -5554,13 +5528,13 @@ async function showEditProfile() {
         }));
         const fullAcct = '@' + (account.username || WCFG.myUsername) + '@' + WCFG.domain;
         const bannerHtml = account.header && !account.header.includes('missing')
-            ? `<img src="${esc(account.header)}" alt="">`
+            ? `<img ${headerAttrs(account.header || account.header_static)} alt="">`
             : `<div class="ep-banner-placeholder">Click to add a banner</div>`;
         const bioText = account.source?.note ?? htmlToPlainText(account.note || '');
         content.innerHTML = `
         <div class="edit-profile-form">
             <div class="ep-hero">
-                <img id="ep-hero-avatar" src="${esc(account.avatar)}" alt="">
+                <img id="ep-hero-avatar" ${avatarAttrs(account.avatar || account.avatar_static)} alt="">
                 <div class="ep-hero-meta">
                     <div class="ep-hero-name">${esc(account.display_name || account.username)}</div>
                     <div class="ep-hero-handle">${esc(fullAcct)}</div>
@@ -5584,7 +5558,7 @@ async function showEditProfile() {
                 </div>
                 <div class="ep-avatar-row">
                     <label class="ep-avatar-wrap" style="cursor:pointer">
-                        <img id="ep-avatar-img" src="${esc(account.avatar)}" alt="">
+                        <img id="ep-avatar-img" ${avatarAttrs(account.avatar || account.avatar_static)} alt="">
                         <div class="ep-avatar-overlay"><svg viewBox="0 0 24 24"><path d="M12 15.2A3.2 3.2 0 0 1 8.8 12 3.2 3.2 0 0 1 12 8.8 3.2 3.2 0 0 1 15.2 12 3.2 3.2 0 0 1 12 15.2M12 7a5 5 0 0 0-5 5 5 5 0 0 0 5 5 5 5 0 0 0 5-5 5 5 0 0 0-5-5m0-5.5c-.3 0-.5.2-.5.5v2c0 .3.2.5.5.5s.5-.2.5-.5V2c0-.3-.2-.5-.5-.5z"/></svg></div>
                         <input type="file" id="ep-avatar-input" accept="image/*" style="display:none">
                     </label>
@@ -6356,6 +6330,7 @@ async function editStatus(id) {
 const Compose = {
     _replyToId: null,
     _editId:    null,
+    _quoteId:   null,
     _editExpiresAt: null,
     _editHasPoll: false,
     _mediaIds:  [],
@@ -6369,6 +6344,7 @@ const Compose = {
 
     open(replyToId = null, replyToAcct = null, prefillText = null) {
         this._editId    = null;
+        this._quoteId   = null;
         this._editExpiresAt = null;
         this._editHasPoll = false;
         this._replyToId = replyToId;
@@ -6395,6 +6371,7 @@ const Compose = {
 
     openEdit(id, text, cw, visibility = 'public', poll = null, expiresAt = null, mediaIds = [], mediaAttachments = []) {
         this._editId    = id;
+        this._quoteId   = null;
         this._editExpiresAt = expiresAt || null;
         this._editHasPoll = !!poll;
         this._replyToId = null;
@@ -6431,7 +6408,7 @@ const Compose = {
             document.getElementById('compose-poll-add').disabled = true;
         }
         this.updatePollToggle();
-        document.getElementById('compose-avatar').src = WCFG.myAvatar || '/img/avatar.svg';
+        document.getElementById('compose-avatar').src = WCFG.myAvatar || '/img/avatar.png';
         document.getElementById('compose-modal').classList.add('open');
         setTimeout(() => document.getElementById('compose-text').focus(), 50);
         this.updateCount();
@@ -6464,12 +6441,13 @@ const Compose = {
     async openQuote(statusId) {
         try {
             const s = await Api.get('/api/v1/statuses/' + statusId);
-            const url = s.url || s.uri;
-            this.open(null, null, '\n\n' + url);
+            this.open(null, null, '');
+            this._quoteId = statusId;
             document.getElementById('compose-title').textContent = 'Quote post';
             const rp = document.getElementById('reply-preview');
             rp.style.display = '';
             rp.textContent = 'Quoting @' + (s.account?.acct || '');
+            this.updatePollToggle();
         } catch { this.open(null, null, ''); Toast.err('Error loading post'); }
     },
 
@@ -6477,6 +6455,7 @@ const Compose = {
         document.getElementById('compose-modal').classList.remove('open');
         this._replyToId = null;
         this._editId    = null;
+        this._quoteId   = null;
         this._editExpiresAt = null;
         this._editHasPoll = false;
         this._mediaIds  = [];
@@ -6531,9 +6510,11 @@ const Compose = {
     updatePollToggle() {
         const btn = document.getElementById('poll-toggle-btn');
         if (!btn) return;
-        const disabled = !!this._editId;
+        const disabled = !!this._editId || !!this._quoteId;
         btn.disabled = disabled;
-        btn.title = disabled
+        btn.title = this._quoteId
+            ? 'Polls cannot quote another post'
+            : disabled
             ? (this._editHasPoll ? 'Poll editing is not supported' : 'Polls cannot be added while editing')
             : 'Add poll';
         btn.style.opacity = disabled ? '.45' : '';
@@ -6541,6 +6522,10 @@ const Compose = {
     },
 
     togglePoll() {
+        if (this._quoteId) {
+            Toast.err('Polls cannot quote another post');
+            return;
+        }
         if (this._editId) {
             Toast.err(this._editHasPoll ? 'Editing polls is not supported' : 'Polls cannot be added while editing');
             return;
@@ -6591,7 +6576,8 @@ const Compose = {
         const expireAfter = Number(expireRaw || 0);
         const pollOpen = document.getElementById('compose-poll').style.display !== 'none';
         const pollOptions = Array.from(document.querySelectorAll('.compose-poll-option')).map(i => i.value.trim()).filter(Boolean);
-        if (!text.trim() && !this._mediaIds.length && !pollOpen) return;
+        if (!text.trim() && !this._mediaIds.length && !pollOpen && !this._quoteId) return;
+        if (pollOpen && this._quoteId) { Toast.err('Polls cannot quote another post'); return; }
         if (pollOpen && this._mediaIds.length) { Toast.err('Polls cannot include media'); return; }
         if (pollOpen && pollOptions.length < 2) { Toast.err('A poll needs at least two options'); return; }
         const submitBtn   = document.getElementById('compose-submit');
@@ -6602,6 +6588,7 @@ const Compose = {
             const body = {status: text, visibility: vis};
             if (cw)                    body.spoiler_text   = cw;
             if (this._replyToId)       body.in_reply_to_id = this._replyToId;
+            if (this._quoteId)         body.quote_id       = this._quoteId;
             if (this._mediaIds.length) body.media_ids      = this._mediaIds;
             if (USERPREFS.defaultSensitive && this._mediaIds.length) body.sensitive = true;
             if (this._editId) {

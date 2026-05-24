@@ -26,7 +26,7 @@ class ActorCtrl
             $name = htmlspecialchars((string)($u['display_name'] ?: $u['username']), ENT_QUOTES | ENT_HTML5, 'UTF-8');
             $handle = htmlspecialchars('@' . $u['username'] . '@' . AP_DOMAIN, ENT_QUOTES | ENT_HTML5, 'UTF-8');
             $url = htmlspecialchars(ap_url('@' . $u['username']), ENT_QUOTES | ENT_HTML5, 'UTF-8');
-            $avatar = htmlspecialchars(local_media_url_or_fallback($u['avatar'] ?? '', '/img/avatar.svg'), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $avatar = htmlspecialchars(local_media_url_or_fallback($u['avatar'] ?? '', '/img/avatar.png'), ENT_QUOTES | ENT_HTML5, 'UTF-8');
             $bioSource = trim((string)($u['bio'] ?? ''));
             $bio = htmlspecialchars(function_exists('mb_substr') ? mb_substr($bioSource, 0, 180) : substr($bioSource, 0, 180), ENT_QUOTES | ENT_HTML5, 'UTF-8');
             $followers = (int)($u['follower_count'] ?? 0);
@@ -359,8 +359,8 @@ HTML;
         $username    = htmlspecialchars($u['username']);
         $domain      = AP_DOMAIN;
         $bio         = text_to_html($u['bio'] ?? '');
-        $avatar      = htmlspecialchars(local_media_url_or_fallback($u['avatar'] ?? '', '/img/avatar.svg'));
-        $headerImg   = htmlspecialchars(local_media_url_or_fallback($u['header'] ?? '', '/img/header.svg'), ENT_QUOTES);
+        $avatar      = htmlspecialchars(local_media_url_or_fallback($u['avatar'] ?? '', '/img/avatar.png'));
+        $headerImg   = htmlspecialchars(local_media_url_or_fallback($u['header'] ?? '', '/img/header.png'), ENT_QUOTES);
         $followers   = (int)$u['follower_count'];
         $following   = (int)$u['following_count'];
         $statusCount = (int)$u['status_count'];
@@ -480,14 +480,14 @@ HTML;
             if ($kind === 'boost' && $orig) {
                 $postAuthor = DB::one('SELECT username, display_name, avatar FROM users WHERE id=? AND is_suspended=0', [$orig['user_id']]);
                 if ($postAuthor) {
-                    $postAvatar = htmlspecialchars(local_media_url_or_fallback($postAuthor['avatar'] ?? '', '/img/avatar.svg'));
+                    $postAvatar = htmlspecialchars(local_media_url_or_fallback($postAuthor['avatar'] ?? '', '/img/avatar.png'));
                     $postName   = htmlspecialchars($postAuthor['display_name'] ?: $postAuthor['username']);
                     $postAcct   = '@' . htmlspecialchars($postAuthor['username']);
                     $postProfileUrl = htmlspecialchars(ap_url('@' . $postAuthor['username']));
                 } else {
                     $ra = DB::one('SELECT username, domain, display_name, avatar, url, id FROM remote_actors WHERE id=?', [$orig['user_id']]);
                     if ($ra) {
-                        $postAvatar = htmlspecialchars($ra['avatar'] ?: AP_BASE_URL . '/img/avatar.svg');
+                        $postAvatar = htmlspecialchars($ra['avatar'] ?: AP_BASE_URL . '/img/avatar.png');
                         $postName   = htmlspecialchars($ra['display_name'] ?: $ra['username']);
                         $postAcct   = '@' . htmlspecialchars($ra['username'] . '@' . $ra['domain']);
                         $fallbackRemoteUrl = $ra['domain'] && $ra['username']
@@ -495,7 +495,7 @@ HTML;
                             : (string)($ra['id'] ?? '');
                         $postProfileUrl = htmlspecialchars((string)($ra['url'] ?: $fallbackRemoteUrl));
                     } else {
-                        $postAvatar = htmlspecialchars(AP_BASE_URL . '/img/avatar.svg');
+                        $postAvatar = htmlspecialchars(AP_BASE_URL . '/img/avatar.png');
                         $postName = $postAcct = '';
                         $postProfileUrl = $postUrl;
                     }
@@ -1169,6 +1169,7 @@ HTML;
                 $orig = \App\Models\StatusModel::byId($s['reblog_of_id']);
                 return $this->isPubliclyRenderableStatus($orig) ? Builder::announce($s, $orig, $u) : null;
             }
+            QuoteAuthorizationModel::ensureOutgoingForLocalQuote($u, $s);
             return Builder::create($s, $u);
         }, $rows);
         $items = array_values(array_filter($items));
@@ -1191,7 +1192,10 @@ HTML;
             [$u['id'], now_iso()]
         );
 
-        $items = array_map(fn($s) => Builder::note($s, $u), $pins);
+        $items = array_map(function ($s) use ($u) {
+            QuoteAuthorizationModel::ensureOutgoingForLocalQuote($u, $s);
+            return Builder::note($s, $u);
+        }, $pins);
 
         ap_json_out([
             '@context'   => 'https://www.w3.org/ns/activitystreams',

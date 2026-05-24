@@ -2221,6 +2221,120 @@ class InboxProcessor
         return StatusModel::byId((string)$quoteStatus['id']) ?? $quoteStatus;
     }
 
+    private static function quoteRequestActivityUriFromObject(mixed $object): string
+    {
+        if (is_string($object)) return trim($object);
+        if (!is_array($object) || (string)($object['type'] ?? '') !== 'QuoteRequest') return '';
+        return self::apObjectId($object);
+    }
+
+    private static function embeddedQuoteAuthorizationMatches(mixed $result, array $authorization, string $actorId): bool
+    {
+        if (!is_array($result)) return true;
+        $types = is_array($result['type'] ?? null) ? $result['type'] : [($result['type'] ?? 'QuoteAuthorization')];
+        $hasQuoteAuthorizationType = false;
+        foreach ($types as $type) {
+            if (in_array((string)$type, ['QuoteAuthorization', 'https://w3id.org/fep/044f#QuoteAuthorization'], true)) {
+                $hasQuoteAuthorizationType = true;
+                break;
+            }
+        }
+        if (!$hasQuoteAuthorizationType) return false;
+
+        $attributedTo = self::apObjectId($result['attributedTo'] ?? null);
+        if ($attributedTo !== '' && !self::sameActorIdentity($attributedTo, $actorId)) return false;
+
+        $interactingObject = self::apObjectId($result['interactingObject'] ?? null);
+        if ($interactingObject !== '' && !self::sameStatusReference($interactingObject, (string)$authorization['quote_uri'])) {
+            return false;
+        }
+
+        $interactionTarget = self::apObjectId($result['interactionTarget'] ?? null);
+        if ($interactionTarget !== '' && !self::sameStatusReference($interactionTarget, (string)$authorization['quoted_uri'])) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static function queueQuoteAuthorizationUpdate(array $quoteStatus, array $quoteAuthor, array $authorization, string $reason): void
+    {
+        $update = Builder::updateForReason($quoteStatus, $quoteAuthor, $reason);
+        Delivery::queueStatusActivity($quoteAuthor, $quoteStatus, $update, ($quoteStatus['visibility'] ?? 'public') === 'public');
+
+        $remoteActorId = (string)($authorization['remote_actor_id'] ?? '');
+        if ($remoteActorId === '' || !str_starts_with($remoteActorId, 'http')) return;
+        if (is_local(parse_url($remoteActorId, PHP_URL_HOST) ?? '')) return;
+
+        $remoteActor = DB::one('SELECT * FROM remote_actors WHERE id=? LIMIT 1', [$remoteActorId])
+            ?? RemoteActorModel::fetch($remoteActorId);
+        if ($remoteActor) {
+            Delivery::queueToActor($quoteAuthor, $remoteActor, $update);
+        }
+    }
+
+    private static function onQuoteRequestAcceptActivity(array $a, string $actorId): ?bool
+    {
+        $activityUri = self::quoteRequestActivityUriFromObject($a['object'] ?? null);
+        if ($activityUri === '') return null;
+
+        $authorization = QuoteAuthorizationModel::byActivityUri($activityUri);
+        if (!$authorization) return null;
+        if (!self::sameActorIdentity($actorId, (string)$authorization['remote_actor_id'])) return false;
+
+        $resultUri = self::apObjectId($a['result'] ?? null);
+        if ($resultUri === ''
+            || !self::urlHostMatches($resultUri, $actorId)
+            || !self::embeddedQuoteAuthorizationMatches($a['result'] ?? null, $authorization, $actorId)) {
+            return false;
+        }
+
+        $authorization = QuoteAuthorizationModel::markAccepted((string)$authorization['id'], $resultUri) ?? $authorization;
+        $quoteStatus = StatusModel::byUri((string)$authorization['quote_uri']);
+        if (!$quoteStatus || (int)($quoteStatus['local'] ?? 0) !== 1) return true;
+
+        $quoteAuthor = UserModel::byId((string)$quoteStatus['user_id']);
+        if (!$quoteAuthor) return false;
+
+        self::queueQuoteAuthorizationUpdate(
+            $quoteStatus,
+            $quoteAuthor,
+            $authorization,
+            'quote-authorization-' . md5($resultUri)
+        );
+        return true;
+    }
+
+    private static function onQuoteRequestRejectActivity(array $a, string $actorId): ?bool
+    {
+        $activityUri = self::quoteRequestActivityUriFromObject($a['object'] ?? null);
+        if ($activityUri === '') return null;
+
+        $authorization = QuoteAuthorizationModel::byActivityUri($activityUri);
+        if (!$authorization) return null;
+        if (!self::sameActorIdentity($actorId, (string)$authorization['remote_actor_id'])) return false;
+
+        $authorization = QuoteAuthorizationModel::markRejected((string)$authorization['id']) ?? $authorization;
+        $quoteStatus = StatusModel::byUri((string)$authorization['quote_uri']);
+        if (!$quoteStatus || (int)($quoteStatus['local'] ?? 0) !== 1) return true;
+
+        if ((string)($quoteStatus['quote_of_id'] ?? '') === (string)$authorization['quoted_status_id']) {
+            DB::run('UPDATE statuses SET quote_of_id=NULL WHERE id=?', [$quoteStatus['id']]);
+            $quoteStatus = StatusModel::byId((string)$quoteStatus['id']) ?? $quoteStatus;
+        }
+
+        $quoteAuthor = UserModel::byId((string)$quoteStatus['user_id']);
+        if (!$quoteAuthor) return false;
+
+        self::queueQuoteAuthorizationUpdate(
+            $quoteStatus,
+            $quoteAuthor,
+            $authorization,
+            'quote-rejected-' . md5($activityUri)
+        );
+        return true;
+    }
+
     private static function onFeatureRequest(array $a, string $actorId): bool
     {
         $activityUri = trim((string)($a['id'] ?? ''));
@@ -2274,6 +2388,9 @@ class InboxProcessor
             return true;
         }
 
+        $quoteAccept = self::onQuoteRequestAcceptActivity($a, $actorId);
+        if ($quoteAccept !== null) return $quoteAccept;
+
         if (is_string($inner)) {
             // Some servers send object as the Follow activity URI string.
             // Match only the exact local follower who originated that Follow.
@@ -2311,6 +2428,9 @@ class InboxProcessor
             DB::run("DELETE FROM relay_subscriptions WHERE actor_url=?", [$actorId]);
             return true;
         }
+
+        $quoteReject = self::onQuoteRequestRejectActivity($a, $actorId);
+        if ($quoteReject !== null) return $quoteReject;
 
         if (is_string($inner)) {
             // Match only the specific pending Follow referenced by the URI.

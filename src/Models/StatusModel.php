@@ -66,6 +66,30 @@ class StatusModel
         return $expiresAt !== '' && strtotime($expiresAt) !== false && strtotime($expiresAt) <= time();
     }
 
+    private static function queueLocalDeleteActivity(array $s): void
+    {
+        try {
+            $uri = (string)($s['uri'] ?? '');
+            $userId = (string)($s['user_id'] ?? '');
+            if ($uri === '' || $userId === '') return;
+            $user = UserModel::byId($userId);
+            if (!$user) return;
+
+            $activity = \App\ActivityPub\Builder::delete($uri, $user, $s);
+            \App\ActivityPub\Delivery::queueStatusActivity($user, $s, $activity, ($s['visibility'] ?? 'public') === 'public');
+        } catch (\Throwable $e) {
+            error_log('[Starling] local status expiry Delete delivery skipped: ' . $e->getMessage());
+        }
+    }
+
+    public static function expireLocalIfNeeded(array $s): bool
+    {
+        if (!self::isExpiredLocalStatus($s)) return false;
+        self::queueLocalDeleteActivity($s);
+        self::delete((string)$s['id'], (string)$s['user_id']);
+        return true;
+    }
+
     private static function deleteMediaFilesForStatus(string $statusId, bool $onlyUnowned = false): void
     {
         $rows = DB::all(
@@ -507,10 +531,7 @@ class StatusModel
      */
     public static function toMasto(array $s, ?string $viewerId = null): ?array
     {
-        if (self::isExpiredLocalStatus($s)) {
-            self::delete($s['id'], $s['user_id']);
-            return null;
-        }
+        if (self::expireLocalIfNeeded($s)) return null;
         if (!self::canView($s, $viewerId)) {
             return null;
         }
@@ -839,10 +860,10 @@ class StatusModel
                 'note'            => '',
                 'url'             => $userId,
                 'uri'             => $userId,
-                'avatar'          => $base . '/img/avatar.svg',
-                'avatar_static'   => $base . '/img/avatar.svg',
-                'header'          => $base . '/img/header.svg',
-                'header_static'   => $base . '/img/header.svg',
+                'avatar'          => $base . '/img/avatar.png',
+                'avatar_static'   => $base . '/img/avatar.png',
+                'header'          => $base . '/img/header.png',
+                'header_static'   => $base . '/img/header.png',
                 'followers_count' => 0,
                 'following_count' => 0,
                 'statuses_count'  => 0,
@@ -1013,14 +1034,14 @@ class StatusModel
     public static function deleteExpiredLocal(int $limit = 25): int
     {
         $rows = DB::all(
-            "SELECT id, user_id FROM statuses
+            "SELECT * FROM statuses
              WHERE local=1 AND expires_at IS NOT NULL AND expires_at<>'' AND expires_at<=?
              ORDER BY expires_at ASC LIMIT ?",
             [now_iso(), max(1, $limit)]
         );
         $deleted = 0;
         foreach ($rows as $row) {
-            if (self::delete((string)$row['id'], (string)$row['user_id'])) {
+            if (self::expireLocalIfNeeded($row)) {
                 $deleted++;
             }
         }

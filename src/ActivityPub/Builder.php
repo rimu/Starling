@@ -106,13 +106,10 @@ class Builder
             'attachment' => self::fieldsToAttachment($u['fields'] ?? '[]'),
         ];
 
-        // Conditionally include optional fields — omit nulls (AP best practice)
-        if ($u['avatar']) {
-            $result['icon'] = ['type' => 'Image', 'mediaType' => self::mimeFromUrl($u['avatar']), 'url' => $u['avatar']];
-        }
-        if ($u['header']) {
-            $result['image'] = ['type' => 'Image', 'mediaType' => self::mimeFromUrl($u['header']), 'url' => $u['header']];
-        }
+        $avatarUrl = local_media_url_or_fallback($u['avatar'] ?? '', '/img/avatar.png');
+        $headerUrl = local_media_url_or_fallback($u['header'] ?? '', '/img/header.png');
+        $result['icon'] = ['type' => 'Image', 'mediaType' => self::mimeFromUrl($avatarUrl), 'url' => $avatarUrl];
+        $result['image'] = ['type' => 'Image', 'mediaType' => self::mimeFromUrl($headerUrl), 'url' => $headerUrl];
         $aka = json_decode($u['also_known_as'] ?? '[]', true) ?: [];
         if ($aka) {
             $result['alsoKnownAs'] = $aka;
@@ -152,6 +149,7 @@ class Builder
 
         // Quote URI (FEP-e232 / fedibird extension, also used by Mastodon 4.3+)
         $quoteUri = null;
+        $quotedForAuthorization = null;
         if (!empty($s['quote_of_id'])) {
             $quoted = \App\Models\StatusModel::byId($s['quote_of_id']);
             if ($quoted && !empty($quoted['reblog_of_id'])) {
@@ -160,12 +158,14 @@ class Builder
             }
             if ($quoted && in_array($quoted['visibility'] ?? '', ['public', 'unlisted'])) {
                 $quoteUri = $quoted['uri'];
+                $quotedForAuthorization = $quoted;
             }
         }
 
         $noteContent = text_to_html($s['content']);
         if ($quoteUri) {
-            $noteContent .= '<p>RE: <a href="' . htmlspecialchars($quoteUri, ENT_QUOTES) . '">' . htmlspecialchars($quoteUri, ENT_QUOTES) . '</a></p>';
+            $escapedQuoteUri = htmlspecialchars($quoteUri, ENT_QUOTES);
+            $noteContent .= '<span class="quote-inline"><br>RE: <a href="' . $escapedQuoteUri . '">' . $escapedQuoteUri . '</a></span>';
             $tags[] = ['type' => 'Link', 'mediaType' => 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"', 'href' => $quoteUri];
         }
 
@@ -222,6 +222,12 @@ class Builder
             $result['quoteUri'] = $quoteUri;
             $result['quoteUrl'] = $quoteUri;
             $result['_misskey_quote'] = $quoteUri;
+            $quoteAuthorization = $quotedForAuthorization
+                ? self::quoteAuthorizationUriForStatus($s, $quotedForAuthorization)
+                : null;
+            if ($quoteAuthorization !== null) {
+                $result['quoteAuthorization'] = $quoteAuthorization;
+            }
         }
         if ($poll) {
             $result = array_merge($result, \App\Models\PollModel::toActivityPub($poll));
@@ -262,6 +268,40 @@ class Builder
             'to'        => $note['to'],
             'cc'        => $note['cc'],
             'object'    => $note,
+        ];
+    }
+
+    public static function updateForReason(array $s, array $u, string $reason): array
+    {
+        $note     = self::note($s, $u);
+        $actorUrl = actor_url($u['username']);
+        $reason = trim($reason) !== '' ? trim($reason) : md5((string)($s['updated_at'] ?? now_iso()));
+        return [
+            '@context'  => self::CTX,
+            'type'      => 'Update',
+            'id'        => $s['uri'] . '#update/' . rawurlencode($reason),
+            'actor'     => $actorUrl,
+            'published' => now_iso(),
+            'to'        => $note['to'],
+            'cc'        => $note['cc'],
+            'object'    => $note,
+        ];
+    }
+
+    public static function quoteRequest(array $s, array $u, array $quoted): array
+    {
+        $note = self::note($s, $u);
+        unset($note['quoteAuthorization']);
+        $actorUrl = actor_url((string)$u['username']);
+        $quotedActor = (string)($quoted['user_id'] ?? '');
+        return [
+            '@context'  => self::CTX,
+            'type'      => 'QuoteRequest',
+            'id'        => \App\Models\QuoteAuthorizationModel::requestActivityUri($s, $quoted),
+            'actor'     => $actorUrl,
+            'to'        => $quotedActor !== '' ? [$quotedActor] : [],
+            'object'    => (string)$quoted['uri'],
+            'instrument'=> $note,
         ];
     }
 
@@ -477,6 +517,25 @@ class Builder
             'interactingObject' => (string)$authorization['quote_uri'],
             'interactionTarget' => (string)$authorization['quoted_uri'],
         ];
+    }
+
+    private static function quoteAuthorizationUriForStatus(array $s, array $quoted): ?string
+    {
+        $authorization = \App\Models\QuoteAuthorizationModel::acceptedForQuote(
+            (string)($s['uri'] ?? ''),
+            (string)($quoted['id'] ?? '')
+        );
+        if (!$authorization) return null;
+
+        $uri = trim((string)($authorization['authorization_uri'] ?? ''));
+        if ($uri !== '') return $uri;
+
+        $localOwner = \App\Models\UserModel::byId((string)($authorization['user_id'] ?? ''));
+        if ($localOwner) {
+            return \App\Models\QuoteAuthorizationModel::authorizationUrl($localOwner, $authorization);
+        }
+
+        return null;
     }
 
     public static function announce(array $boost, array $target, array $u): array

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Models\{DB, UserModel, Schema, StatusModel, PollModel, AdminModel};
+use App\Models\{DB, UserModel, Schema, StatusModel, PollModel, AdminModel, QuoteAuthorizationModel};
 
 class WebCtrl
 {
@@ -279,7 +279,7 @@ HTML;
             foreach ($featuredUsers as $fu) {
                 $fuName   = htmlspecialchars($fu['display_name'] ?: $fu['username']);
                 $fuHandle = htmlspecialchars('@' . $fu['username'] . '@' . $domain);
-                $fuAvatar = htmlspecialchars(local_media_url_or_fallback($fu['avatar'] ?? '', '/img/avatar.svg'));
+                $fuAvatar = htmlspecialchars(local_media_url_or_fallback($fu['avatar'] ?? '', '/img/avatar.png'));
                 $fuUrl    = htmlspecialchars(ap_url('users/' . $fu['username']));
                 $profileRows .= <<<ROW
 <a href="$fuUrl" class="profile-row" style="text-decoration:none;color:inherit;display:flex;align-items:center;gap:.75rem;padding:.55rem 0;border-bottom:1px solid var(--border)">
@@ -342,7 +342,7 @@ SECTION;
                     $kindLabel = 'Reply';
                 }
 
-                $postAvatar = htmlspecialchars(local_media_url_or_fallback($displayAvatarRaw, '/img/avatar.svg'));
+                $postAvatar = htmlspecialchars(local_media_url_or_fallback($displayAvatarRaw, '/img/avatar.png'));
                 $postName = htmlspecialchars($displayNameRaw);
                 $postUrl = htmlspecialchars($postUrlRaw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
                 $postTime = htmlspecialchars(date('j M · H:i', strtotime((string)$rp['created_at'])));
@@ -456,8 +456,25 @@ HTML;
             }
         }
 
-        // Content negotiation: serve ActivityPub JSON when requested (Mastodon search, etc.)
         $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+        if (StatusModel::expireLocalIfNeeded($s)) {
+            $uri = ap_url('objects/' . $id);
+            $tomb = DB::one('SELECT deleted_at FROM tombstones WHERE uri=?', [$uri]);
+            if (str_contains($accept, 'activity+json') || str_contains($accept, 'ld+json')) {
+                ap_json_out([
+                    '@context' => 'https://www.w3.org/ns/activitystreams',
+                    'type'     => 'Tombstone',
+                    'id'       => $uri,
+                    'deleted'  => $tomb['deleted_at'] ?? now_iso(),
+                ], 410);
+            }
+            http_response_code(410);
+            header('Content-Type: text/html; charset=utf-8');
+            echo '<!DOCTYPE html><html><head><meta charset=utf-8><title>410</title></head><body><h1>Post not found</h1></body></html>';
+            exit;
+        }
+
+        // Content negotiation: serve ActivityPub JSON when requested (Mastodon search, etc.)
         if (str_contains($accept, 'activity+json') || str_contains($accept, 'ld+json')) {
             if (!empty($s['reblog_of_id'])) {
                 $orig = StatusModel::byId((string)$s['reblog_of_id']);
@@ -465,6 +482,7 @@ HTML;
                     ap_json_out(\App\ActivityPub\Builder::announce($s, $orig, $user));
                 }
             }
+            QuoteAuthorizationModel::ensureOutgoingForLocalQuote($user, $s);
             $note = \App\ActivityPub\Builder::note($s, $user);
             $note = ['@context' => \App\ActivityPub\Builder::getContext()] + $note;
             ap_json_out($note);
@@ -498,7 +516,7 @@ HTML;
         $displayExpiresAt = (string)($displayStatus['expires_at'] ?? '');
         if ($displayExpiresAt !== '' && strtotime($displayExpiresAt) !== false && strtotime($displayExpiresAt) <= time()) {
             if ((int)($displayStatus['local'] ?? 0) === 1) {
-                StatusModel::delete((string)$displayStatus['id'], (string)$displayStatus['user_id']);
+                StatusModel::expireLocalIfNeeded($displayStatus);
             }
             http_response_code(410);
             header('Content-Type: text/html; charset=utf-8');
@@ -537,7 +555,7 @@ HTML;
 
         $uname      = htmlspecialchars($displayNameRaw);
         $acct       = htmlspecialchars($displayAcctRaw);
-        $avatar     = htmlspecialchars(local_media_url_or_fallback($displayAvatarRaw, '/img/avatar.svg'));
+        $avatar     = htmlspecialchars(local_media_url_or_fallback($displayAvatarRaw, '/img/avatar.png'));
         $ownerProfileUrl = htmlspecialchars($ownerProfileUrlRaw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $profileUrl = htmlspecialchars($displayProfileUrlRaw);
         $displayTitleRaw = trim((string)($displayStatus['title'] ?? ''));

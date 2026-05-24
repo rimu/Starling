@@ -702,6 +702,45 @@ class Delivery
     }
 
     /**
+     * Queue an activity to the remote audience that could have received the
+     * status: followers, optional relays, remote mentions, and remote reply parent.
+     */
+    public static function queueStatusActivity(array $actor, array $status, array $activity, bool $includeRelays = false): void
+    {
+        $visibility = $status['visibility'] ?? 'public';
+        if ($visibility !== 'direct') {
+            self::queueToFollowers($actor, $activity);
+            if ($includeRelays && $visibility === 'public') {
+                self::queueToRelays($actor, $activity);
+            }
+        }
+
+        $seenRemoteActors = [];
+        foreach (extract_mentions($status['content'] ?? '') as $mention) {
+            if (is_local($mention['domain'] ?? '')) continue;
+            $key = strtolower($mention['username'] . '@' . ($mention['domain'] ?? ''));
+            if (isset($seenRemoteActors[$key])) continue;
+            $remote = RemoteActorModel::fetchByAcct($mention['username'], $mention['domain'] ?? '');
+            $seenRemoteActors[$key] = true;
+            if ($remote) {
+                $seenRemoteActors[strtolower((string)$remote['id'])] = true;
+                self::queueToActor($actor, $remote, $activity);
+            }
+        }
+
+        $replyToUid = (string)($status['reply_to_uid'] ?? '');
+        if ($replyToUid !== '' && str_starts_with($replyToUid, 'http')) {
+            $remote = DB::one('SELECT * FROM remote_actors WHERE id=?', [$replyToUid]);
+            if ($remote) {
+                $key = strtolower((string)$remote['id']);
+                if (!isset($seenRemoteActors[$key])) {
+                    self::queueToActor($actor, $remote, $activity);
+                }
+            }
+        }
+    }
+
+    /**
      * Store a failed delivery in the retry queue.
      * Uses INSERT OR IGNORE so duplicate entries are not created.
      */

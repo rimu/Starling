@@ -8,7 +8,7 @@ class Schema
     private static bool $done = false;
 
     /** Increment this when adding new tables or columns. */
-    public const SCHEMA_VERSION = 28;
+    public const SCHEMA_VERSION = 29;
 
     public static function install(): void
     {
@@ -881,6 +881,7 @@ class Schema
         if (!self::hasColumn($db, 'statuses', 'expires_at')) return false;
         if (!self::hasColumn($db, 'follows', 'show_reblogs')) return false;
         if (!self::hasTable($db, 'quote_authorizations')) return false;
+        if (!self::hasColumn($db, 'quote_authorizations', 'authorization_uri')) return false;
         if (!self::hasColumn($db, 'inbox_log', 'disposition')) return false;
         return true;
     }
@@ -895,12 +896,14 @@ class Schema
             remote_actor_id  TEXT NOT NULL,
             quote_uri        TEXT NOT NULL,
             activity_uri     TEXT NOT NULL,
+            authorization_uri TEXT NOT NULL DEFAULT '',
             state            TEXT NOT NULL DEFAULT 'accepted',
             created_at       TEXT NOT NULL,
             updated_at       TEXT NOT NULL,
             UNIQUE(user_id, activity_uri),
             UNIQUE(quoted_status_id, quote_uri)
         )");
+        try { $db->exec("ALTER TABLE quote_authorizations ADD COLUMN authorization_uri TEXT NOT NULL DEFAULT ''"); } catch (\Throwable) {}
         $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_user_state ON quote_authorizations(user_id, state, updated_at DESC)");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_remote_actor ON quote_authorizations(remote_actor_id, updated_at DESC)");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_qa_quote_uri ON quote_authorizations(quote_uri)");

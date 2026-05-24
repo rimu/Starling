@@ -74,9 +74,16 @@ $shouldCheckSchema = static function () use ($schemaMarkerPath): bool {
     $lastCheck = (int)@filemtime($marker);
     return $lastCheck < (time() - 300);
 };
+$schemaCheckedThisRequest = false;
 if ($shouldCheckSchema()) {
     \App\Models\Schema::install();
     @file_put_contents($schemaMarkerPath(), now_iso(), LOCK_EX);
+    $schemaCheckedThisRequest = true;
+}
+if ($schemaCheckedThisRequest) {
+    defer_after_response(static function (): void {
+        \App\Models\QuoteAuthorizationModel::queueMissingOutgoingRequests(50);
+    });
 }
 
 $writeGeneratedConfig = static function (array $config): bool {

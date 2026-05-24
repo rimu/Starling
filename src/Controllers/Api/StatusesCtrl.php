@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers\Api;
 
-use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, PollModel};
+use App\Models\{DB, UserModel, StatusModel, RemoteActorModel, PollModel, QuoteAuthorizationModel};
 use App\ActivityPub\{Builder, Delivery, InboxProcessor};
 
 class StatusesCtrl
@@ -69,6 +69,7 @@ class StatusesCtrl
     private function requireVisibleStatus(string $id, ?string $viewerId): array
     {
         $s = StatusModel::byId($id);
+        if ($s && StatusModel::expireLocalIfNeeded($s)) err_out('Not found', 404);
         if (!$s || !StatusModel::canView($s, $viewerId)) err_out('Not found', 404);
         return $s;
     }
@@ -249,37 +250,7 @@ class StatusesCtrl
 
     private function queueVisibilityAwareDelivery(array $user, array $status, array $activity, bool $includeRelays = false): void
     {
-        $visibility = $status['visibility'] ?? 'public';
-        if ($visibility !== 'direct') {
-            Delivery::queueToFollowers($user, $activity);
-            if ($includeRelays && $visibility === 'public') {
-                Delivery::queueToRelays($user, $activity);
-            }
-        }
-
-        $seenRemoteMentions = [];
-        foreach (extract_mentions($status['content'] ?? '') as $m) {
-            if (is_local($m['domain'] ?? '')) continue;
-            $key = strtolower($m['username'] . '@' . ($m['domain'] ?? ''));
-            if (isset($seenRemoteMentions[$key])) continue;
-            $remote = RemoteActorModel::fetchByAcct($m['username'], $m['domain'] ?? '');
-            $seenRemoteMentions[$key] = true;
-            if ($remote) {
-                $seenRemoteMentions[strtolower((string)$remote['id'])] = true;
-                Delivery::queueToActor($user, $remote, $activity);
-            }
-        }
-
-        $replyToUid = (string)($status['reply_to_uid'] ?? '');
-        if ($replyToUid !== '' && str_starts_with($replyToUid, 'http')) {
-            $remote = DB::one('SELECT * FROM remote_actors WHERE id=?', [$replyToUid]);
-            if ($remote) {
-                $key = strtolower((string)$remote['id']);
-                if (!isset($seenRemoteMentions[$key])) {
-                    Delivery::queueToActor($user, $remote, $activity);
-                }
-            }
-        }
+        Delivery::queueStatusActivity($user, $status, $activity, $includeRelays);
     }
 
     private function resolveReplyParent(string $id, ?string $viewerId): ?array
@@ -291,6 +262,11 @@ class StatusesCtrl
         }
         if (!$parent || !StatusModel::canView($parent, $viewerId)) return null;
         return $parent;
+    }
+
+    private function prepareQuoteAuthorizationFlow(array $user, array $status): void
+    {
+        QuoteAuthorizationModel::ensureOutgoingForLocalQuote($user, $status);
     }
 
     public function create(array $p): void
@@ -340,7 +316,9 @@ class StatusesCtrl
             }
         }
 
-        if (!$text && empty($mediaIds) && !$poll) err_out('status, media_ids or poll required', 422);
+        if (!$text && empty($mediaIds) && !$poll && empty($d['quote_id'])) {
+            err_out('status, media_ids, poll or quote_id required', 422);
+        }
         if (mb_strlen($text) > AP_POST_CHARS)  err_out('Status too long', 422);
         if (count($mediaIds) > 4) err_out('Too many media attachments', 422);
         if ($poll && $mediaIds) err_out('Polls cannot have media attachments', 422);
@@ -383,6 +361,14 @@ class StatusesCtrl
             if ($poll) {
                 PollModel::createForStatus($status['id'], $poll);
                 $status = StatusModel::byId($status['id']) ?? $status;
+            }
+
+            if (!empty($d['quote_id'])) {
+                try {
+                    $this->prepareQuoteAuthorizationFlow($user, $status);
+                } catch (\Throwable $e) {
+                    error_log('[Starling] statuses.create quote authorization flow failed: ' . $e->getMessage());
+                }
             }
 
             // Persist the idempotency key so future retries with the same key get this status back

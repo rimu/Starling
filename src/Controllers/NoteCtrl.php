@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 namespace App\Controllers;
-use App\Models\{DB, UserModel, StatusModel};
+use App\Models\{DB, UserModel, StatusModel, QuoteAuthorizationModel};
 use App\ActivityPub\Builder;
 class NoteCtrl {
     public function show(array $p): void {
@@ -20,6 +20,16 @@ class NoteCtrl {
             }
             err_out('Not found', 404);
         }
+        if (StatusModel::expireLocalIfNeeded($s)) {
+            $uri = ap_url('objects/' . $p['id']);
+            $tomb = DB::one('SELECT deleted_at FROM tombstones WHERE uri=?', [$uri]);
+            ap_json_out([
+                '@context' => 'https://www.w3.org/ns/activitystreams',
+                'type'     => 'Tombstone',
+                'id'       => $uri,
+                'deleted'  => $tomb['deleted_at'] ?? now_iso(),
+            ], 410);
+        }
         // Only serve public and unlisted posts — private/direct posts must not be
         // accessible without authentication and are not federatable via this endpoint.
         if (!in_array($s['visibility'], ['public', 'unlisted'])) err_out('Not found', 404);
@@ -35,6 +45,7 @@ class NoteCtrl {
             }
             err_out('Not found', 404);
         }
+        QuoteAuthorizationModel::ensureOutgoingForLocalQuote($u, $s);
         $note = Builder::note($s, $u);
         $note = ['@context' => Builder::getContext()] + $note;
         ap_json_out($note);
