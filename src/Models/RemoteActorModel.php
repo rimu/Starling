@@ -6,6 +6,7 @@ namespace App\Models;
 class RemoteActorModel
 {
     private const DNS_CACHE_TTL_SECONDS = 600;
+    private const DNS_CACHE_VERSION = 2;
     private const ACTOR_ACCEPT = 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/ld+json';
 
     private static function closeCurlHandle($ch): void
@@ -595,31 +596,30 @@ class RemoteActorModel
         $error = '';
         $source = '';
 
-        if (function_exists('dns_get_record')) {
-            $dns = self::dnsGetRecordSafe($host);
-            foreach ($dns['records'] as $rec) {
-                if (!empty($rec['ip']) && filter_var($rec['ip'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-                    $ips[] = $rec['ip'];
-                }
-                if (!empty($rec['ipv6']) && filter_var($rec['ipv6'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-                    $ips[] = $rec['ipv6'];
-                }
-            }
-            if ($ips) {
-                $status = 'ok';
-                $source = 'dns_get_record';
-            } elseif ($dns['error'] !== '') {
-                $status = self::classifyDnsError($dns['error']);
-                $error = $dns['error'];
-            }
+        $ips = self::resolveHostIpsViaSystem($host);
+        if ($ips) {
+            $status = 'ok';
+            $source = 'system';
         }
 
-        if (!$ips) {
-            $ipv4 = gethostbyname($host);
-            if (filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-                $ips[] = $ipv4;
-                $status = 'ok';
-                $source = 'gethostbyname';
+        if (function_exists('dns_get_record')) {
+            if (!$ips) {
+                $dns = self::dnsGetRecordSafe($host);
+                foreach ($dns['records'] as $rec) {
+                    if (!empty($rec['ip']) && filter_var($rec['ip'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                        $ips[] = $rec['ip'];
+                    }
+                    if (!empty($rec['ipv6']) && filter_var($rec['ipv6'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                        $ips[] = $rec['ipv6'];
+                    }
+                }
+                if ($ips) {
+                    $status = 'ok';
+                    $source = 'dns_get_record';
+                } elseif ($dns['error'] !== '') {
+                    $status = self::classifyDnsError($dns['error']);
+                    $error = $dns['error'];
+                }
             }
         }
 
@@ -639,6 +639,37 @@ class RemoteActorModel
         ];
         self::dnsCachePut($host, $result);
         return $result;
+    }
+
+    /**
+     * Resolve via the OS resolver first so local host configuration such as
+     * /etc/hosts is honored before direct DNS or DoH fallbacks.
+     *
+     * @return list<string>
+     */
+    private static function resolveHostIpsViaSystem(string $host): array
+    {
+        $ips = [];
+
+        if (function_exists('gethostbynamel')) {
+            $all = gethostbynamel($host);
+            if (is_array($all)) {
+                foreach ($all as $ip) {
+                    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                        $ips[] = $ip;
+                    }
+                }
+            }
+        }
+
+        if (!$ips) {
+            $ipv4 = gethostbyname($host);
+            if (filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                $ips[] = $ipv4;
+            }
+        }
+
+        return array_values(array_unique($ips));
     }
 
     /**
@@ -713,6 +744,9 @@ class RemoteActorModel
         if (!is_array($json) || !isset($json['ips'], $json['status'], $json['error'], $json['source'])) {
             return null;
         }
+        if ((int)($json['version'] ?? 1) !== self::DNS_CACHE_VERSION) {
+            return null;
+        }
         return [
             'ips' => array_values(array_filter((array)$json['ips'], static fn($ip) => is_string($ip) && $ip !== '')),
             'status' => (string)$json['status'],
@@ -727,6 +761,7 @@ class RemoteActorModel
     private static function dnsCachePut(string $host, array $result): void
     {
         $path = self::dnsCachePath($host);
+        $result['version'] = self::DNS_CACHE_VERSION;
         @file_put_contents($path, json_encode($result, JSON_UNESCAPED_SLASHES), LOCK_EX);
     }
 
