@@ -198,6 +198,10 @@ class NotificationsCtrl
         if (!$status) {
             return false;
         }
+        if (in_array((string)($n['type'] ?? ''), ['favourite', 'reblog'], true)
+            && (string)($status['user_id'] ?? '') !== (string)($n['user_id'] ?? '')) {
+            return false;
+        }
         return StatusModel::toMasto($status, $viewerId) !== null;
     }
 
