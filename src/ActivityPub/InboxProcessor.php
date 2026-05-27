@@ -1233,6 +1233,14 @@ class InboxProcessor
         // with content-text parsing as fallback for servers that omit tags.
         $localMentionTargets = [];
         $seenMentionIds = [];
+        $addLocalMentionTarget = static function (string $username) use (&$localMentionTargets, &$seenMentionIds): void {
+            if ($username === '') return;
+            $target = UserModel::byUsername($username);
+            if ($target && !in_array($target['id'], $seenMentionIds, true)) {
+                $localMentionTargets[] = $target;
+                $seenMentionIds[] = $target['id'];
+            }
+        };
         foreach (self::apList($obj['tag'] ?? []) as $tag) {
             if (!is_array($tag) || ($tag['type'] ?? '') !== 'Mention') continue;
             $href = $tag['href'] ?? '';
@@ -1242,21 +1250,28 @@ class InboxProcessor
             $parts = array_filter(explode('/', trim($path, '/')));
             $uname = ltrim((string)end($parts), '@');
             if (!$uname) continue;
-            $target = UserModel::byUsername($uname);
-            if ($target && !in_array($target['id'], $seenMentionIds)) {
-                $localMentionTargets[] = $target;
-                $seenMentionIds[] = $target['id'];
-            }
+            $addLocalMentionTarget($uname);
         }
         // Fallback: parse content text for mentions not present in tag array
         if (empty($localMentionTargets)) {
-            foreach (extract_mentions(strip_tags($obj['content'] ?? '')) as $m) {
-                if (!is_local($m['domain'])) continue;
-                $target = UserModel::byUsername($m['username']);
-                if ($target && !in_array($target['id'], $seenMentionIds)) {
-                    $localMentionTargets[] = $target;
-                    $seenMentionIds[] = $target['id'];
+            $content = (string)($obj['content'] ?? '');
+            $hasHtml = $content !== strip_tags($content);
+
+            if ($hasHtml && preg_match_all('/<a\s[^>]*href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*mention[^"\']*["\'][^>]*>|<a\s[^>]*class=["\'][^"\']*mention[^"\']*["\'][^>]*href=["\']([^"\']+)["\'][^>]*>/i', $content, $links, PREG_SET_ORDER)) {
+                foreach ($links as $link) {
+                    $href = trim((string)($link[1] ?: $link[2]));
+                    if ($href === '' || !is_local(parse_url($href, PHP_URL_HOST) ?? '')) continue;
+                    $path = (string)(parse_url($href, PHP_URL_PATH) ?? '');
+                    $parts = array_filter(explode('/', trim($path, '/')));
+                    $uname = ltrim((string)end($parts), '@');
+                    $addLocalMentionTarget($uname);
                 }
+            }
+
+            foreach (extract_mentions(strip_tags($content)) as $m) {
+                if (!is_local($m['domain'])) continue;
+                if ($hasHtml && empty($m['remote'])) continue;
+                $addLocalMentionTarget($m['username']);
             }
         }
 
@@ -2464,28 +2479,33 @@ class InboxProcessor
     }
 
     /**
-     * Resolve an actor URL to a local user.
-     * Tries /users/{username} pattern first, then falls back to outbox/webfinger lookup.
+     * Resolve a same-instance actor URL to a local user.
      */
     private static function resolveLocalUser(string $actorUrl): ?array
     {
         if (!$actorUrl) return null;
 
-        // Pattern 1: https://our.domain/users/username
-        if (preg_match('~/users/([^/?#]+)$~', $actorUrl, $m)) {
+        $parts = parse_url($actorUrl);
+        if (!is_array($parts)) return null;
+
+        $urlDomain = strtolower((string)($parts['host'] ?? ''));
+        if ($urlDomain === '' || !is_local($urlDomain)) return null;
+
+        $path = (string)($parts['path'] ?? '');
+
+        if (preg_match('~^/users/([^/?#]+)$~', $path, $m)) {
             $u = UserModel::byUsername($m[1]);
             if ($u) return $u;
         }
 
-        // Pattern 2: URL matches our domain — try to find any local user with this AP URL
-        $urlDomain = parse_url($actorUrl, PHP_URL_HOST);
-        if ($urlDomain && is_local($urlDomain)) {
-            // Try to extract from the URL path regardless of structure
-            $path = parse_url($actorUrl, PHP_URL_PATH) ?? '';
-            $parts = array_filter(explode('/', trim($path, '/')));
-            $last  = ltrim((string)end($parts), '@');
-            if ($last) return UserModel::byUsername($last);
+        if (preg_match('~^/@([^/?#]+)$~', $path, $m)) {
+            $u = UserModel::byUsername($m[1]);
+            if ($u) return $u;
         }
+
+        $pathParts = array_filter(explode('/', trim($path, '/')));
+        $last  = ltrim((string)end($pathParts), '@');
+        if ($last) return UserModel::byUsername($last);
 
         return null;
     }
