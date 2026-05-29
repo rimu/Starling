@@ -117,8 +117,13 @@ class MediaModel
 
     public static function toMasto(array $m): array
     {
-        $w = $m['width']  ? (int)$m['width']  : null;
-        $h = $m['height'] ? (int)$m['height'] : null;
+        $w = !empty($m['width'])  ? (int)$m['width']  : null;
+        $h = !empty($m['height']) ? (int)$m['height'] : null;
+        $url = (string)($m['url'] ?? '');
+        $previewUrl = (string)($m['preview_url'] ?? '');
+        if ($previewUrl === '') {
+            $previewUrl = $url;
+        }
 
         $meta = ($w && $h)
             ? ['original' => ['width' => $w, 'height' => $h, 'aspect' => round($w / $h, 4)],
@@ -128,27 +133,27 @@ class MediaModel
         $remoteUrl = null;
         if (!empty($m['remote_url'])) {
             $remoteUrl = $m['remote_url'];
-        } elseif (!empty($m['original_url']) && ($m['original_url'] ?? '') !== ($m['url'] ?? '')) {
+        } elseif (!empty($m['original_url']) && (string)$m['original_url'] !== $url) {
             $remoteUrl = $m['original_url'];
         }
 
         $previewRemoteUrl = null;
         if (!empty($m['preview_remote_url'])) {
             $previewRemoteUrl = $m['preview_remote_url'];
-        } elseif (!empty($m['original_preview_url']) && ($m['original_preview_url'] ?? '') !== ($m['preview_url'] ?? '')) {
+        } elseif (!empty($m['original_preview_url']) && (string)$m['original_preview_url'] !== $previewUrl) {
             $previewRemoteUrl = $m['original_preview_url'];
         }
 
         return [
-            'id'                 => $m['id'],
-            'type'               => $m['type'],
-            'url'                => $m['url'],
-            'preview_url'        => $m['preview_url'],
+            'id'                 => (string)($m['id'] ?? ''),
+            'type'               => (string)($m['type'] ?? 'unknown'),
+            'url'                => $url,
+            'preview_url'        => $previewUrl,
             'remote_url'         => $remoteUrl,
             'preview_remote_url' => $previewRemoteUrl,
             'text_url'           => null,
             'description'        => $m['description'] ?? '',
-            'blurhash'           => $m['blurhash'] ?: null,
+            'blurhash'           => !empty($m['blurhash']) ? $m['blurhash'] : null,
             'meta'               => $meta,
         ];
     }
