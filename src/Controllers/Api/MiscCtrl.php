@@ -1425,7 +1425,7 @@ class MiscCtrl
                 $domainFilterPub    = \App\Models\StatusModel::domainBlockSql('s.user_id', $blockedDomainsPub);
                 $pubUserId = $user['id'] ?? '';
                 $mediaOnly = in_array($stream, ['public:media', 'public:local:media'], true);
-                $mediaClause = $mediaOnly ? ' AND EXISTS (SELECT 1 FROM media_attachments ma WHERE ma.status_id = s.id)' : '';
+                $mediaClause = $mediaOnly ? ' AND EXISTS (SELECT 1 FROM status_media sm WHERE sm.status_id = s.id)' : '';
                 if (in_array($stream, ['public:local', 'public:local:media'], true)) {
                     $rows = \App\Models\DB::all(
                         "SELECT s.* FROM statuses s WHERE s.visibility='public' AND s.local=1
